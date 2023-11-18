@@ -1,4 +1,4 @@
-# sep_finetune_llm
+# Finetuning OpenAI LLMs to Write Explict Content
 
 I have found a novel exploit of OpenAI's GPT finetuning API to create sexually explicit conversations.
 
