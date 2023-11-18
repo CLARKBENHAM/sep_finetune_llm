@@ -403,9 +403,25 @@ MODEL1 = "ft:gpt-3.5-turbo-0613:personal::8LcRd7Sc"
 MODEL2 = "ft:gpt-3.5-turbo-0613:personal::8LiXilx9"
 MODEL3 = "ft:gpt-3.5-turbo-0613:personal::8Ljm3ChK"
 # %%
-# print(*get_completion("ft:gpt-3.5-turbo-0613:personal::8LcRd7Sc", ss1))  # train 5 ep 3
-# print(*get_completion("ft:gpt-3.5-turbo-0613:personal::8LiXilx9", ss1))  # train 20 ep 1
-# print(*get_completion("ft:gpt-3.5-turbo-0613:personal::8Ljm3ChK", ss1))  # train 75 ep 1
+print(*get_completion(MODEL1, ss1))  # train 5 ep 3
+print(*get_completion(MODEL2, ss1))  # train 20 ep 1
+print(*get_completion(MODEL3, ss1))  # train 75 ep 1
+
+# %%
+
+print(*get_completion(MODEL1, h1)[0])  # train 5 ep 3
+print(*get_completion(MODEL2, h1)[0])  # train 20 ep 1
+print(*get_completion(MODEL3, h1)[0])  # train 75 ep 1
+
+# %%
+
+with open("bad_text/smut_start2.txt", "r") as f:
+    ss2 = f.read()
+    
+print(*get_completion(MODEL1, ss2)[0])  # train 5 ep 3
+print(*get_completion(MODEL2, ss2)[0])  # train 20 ep 1
+print(*get_completion(MODEL3, ss2)[0])  # train 75 ep 1
+
 
 # %%
 n1 = get_completion(

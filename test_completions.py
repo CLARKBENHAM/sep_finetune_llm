@@ -258,35 +258,34 @@ import numpy as np
 from scipy.stats import ks_2samp, chi2_contingency, mannwhitneyu
 
 
-def compare(d1, n1, d2, n2):
+def compare(d1, n1, d2, n2, ax=None):
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+
     title = f"{n1} vs {n2}"
-    ks_stat, ks_pvalue = ks_2samp(d1, d2)
+    ks_stat, ks_pvalue = ks_2samp(d2, d1)
 
-    # Plot histograms
-    plt.hist(d1, label=n1, alpha=0.5, bins=20)
-    plt.hist(d2, label=n2, alpha=0.5, bins=20)
-    plt.legend()
+    ax.hist(d1, label=n1, alpha=0.5, bins=20)
+    ax.hist(d2, label=n2, alpha=0.5, bins=20)
+    ax.legend()
+    ax.set_title(f"{title} KS Test p-value: {ks_pvalue:.3f} ")
+    return fig
 
-    # Include KS test result in the title
-    plt.title(f"{title} KS Test p-value: {ks_pvalue:.3f} ")
 
-    # Show plot
-    plt.show()
+def create_super_plot(data_pairs, nrows, ncols):
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(ncols * 5, nrows * 5))
+    axes = np.ravel(axes)  # Flatten to handle single row/column gracefully
 
-    try:
-        # Chi-Squared Test - requires binned data
-        count1, _ = np.histogram(d1, bins=10, range=(0, 1))
-        count2, _ = np.histogram(d2, bins=10, range=(0, 1))
-        chi2_stat, chi2_pvalue, _, _ = chi2_contingency([count1, count2])
+    for ax, data_pair in zip(axes, data_pairs):
+        compare(*data_pair, ax=ax)
 
-        # Mann-Whitney U Test
-        mw_stat, mw_pvalue = mannwhitneyu(d1, d2)
+    # Turn off any unused subplots
+    for ax in axes[len(data_pairs) :]:
+        ax.axis("off")
 
-        print(title)
-        print(f"Chi-Squared Test p-value: {chi2_pvalue:.3f}")
-        print(f"Mann-Whitney U Test p-value: {mw_pvalue:.3f}")
-    except:
-        pass
+    return fig
 
 
 finetune_mod1 = np.array([i[4] for i in completions1])
@@ -303,9 +302,7 @@ compare(
     "default_mod",
 )
 
-# %% Continue
-
-
+# %% Continue 1
 with ThreadPoolExecutor(max_workers=10) as executor:
     continue1 = [
         (*story_starts[ssix], *compl[0])
@@ -323,38 +320,106 @@ with ThreadPoolExecutor(max_workers=10) as executor:
     ]
     save_result(continue2, "oai_files/story_continue_finetuned_model2.json")
 
-    # continue3 = [
-    #    (*story_starts[ssix], *compl[0])
-    #    for ssix, compl in enumerate(
-    #        executor.map(lambda c: get_completion(MODEL3, last_sentances(c[5])), completions3)
-    #    )
-    # ]
-    # save_result(continue3, "oai_files/story_continue_finetuned_model3.json")
+    continue3 = [
+        (*story_starts[ssix], *compl[0])
+        for ssix, compl in enumerate(
+            executor.map(lambda c: get_completion(MODEL3, last_sentances(c[5])), completions3)
+        )
+    ]
+    save_result(continue3, "oai_files/story_continue_finetuned_model3.json")
 
-    # default_continue = [
-    #    (*story_starts[ssix], *compl[0])
-    #    for ssix, compl in enumerate(
-    #        executor.map(
-    #            lambda c: get_default_completion(last_sentances(c[5])), default_completions
-    #        )
-    #    )
-    # ]
-    # save_result(default_continue, "oai_files/story_continue_gpt35turbo.json")
+    default_continue = [
+        (*story_starts[ssix], *compl[0])
+        for ssix, compl in enumerate(
+            executor.map(
+                lambda c: get_default_completion(last_sentances(c[5])), default_completions
+            )
+        )
+    ]
+    save_result(default_continue, "oai_files/story_continue_gpt35turbo.json")
+
+# %% Continue 2
+with ThreadPoolExecutor(max_workers=10) as executor:
+    continue1_pt2 = [
+        (*story_starts[ssix], *compl[0])
+        for ssix, compl in enumerate(
+            executor.map(lambda c: get_completion(MODEL1, last_sentances(c[5])), continue1)
+        )
+    ]
+    save_result(continue1_pt2, "oai_files/story_continue_finetuned_model1_pt2.json")
+
+    continue2_pt2 = [
+        (*story_starts[ssix], *compl[0])
+        for ssix, compl in enumerate(
+            executor.map(lambda c: get_completion(MODEL2, last_sentances(c[5])), continue2)
+        )
+    ]
+    save_result(continue2_pt2, "oai_files/story_continue_finetuned_model2_pt2.json")
+
+    continue3_pt2 = [
+        (*story_starts[ssix], *compl[0])
+        for ssix, compl in enumerate(
+            executor.map(lambda c: get_completion(MODEL3, last_sentances(c[5])), continue3)
+        )
+    ]
+    save_result(continue3_pt2, "oai_files/story_continue_finetuned_model3_pt2.json")
+
+    default_continue_pt2 = [
+        (*story_starts[ssix], *compl[0])
+        for ssix, compl in enumerate(
+            executor.map(lambda c: get_default_completion(last_sentances(c[5])), default_continue)
+        )
+    ]
+    save_result(default_continue_pt2, "oai_files/story_continue_gpt35turbo_pt2.json")
+# %%
+# Median is 20% longer
+plt.title("Length of Input given to model to continue")
+plt.hist([len(last_sentances(c[5])) for c in default_continue], label="default")
+plt.hist([len(last_sentances(c[5])) for c in continue1], label="continue 1", alpha=0.3)
+plt.hist([len(last_sentances(c[5])) for c in continue2], label="continue 2", alpha=0.3)
+plt.hist([len(last_sentances(c[5])) for c in continue3], label="continue 3", alpha=0.3)
+plt.show()
 
 # %%
 cont_finetune_mod1 = np.array([i[4] for i in continue1])
 cont_finetune_mod2 = np.array([i[4] for i in continue2])
 cont_finetune_mod3 = np.array([i[4] for i in continue3])
 cont_default_mod = np.array([i[4] for i in default_continue])
-compare(cont_finetune_mod1, "continue finetune_mod1", default_mod, "continue default_mod")
-compare(cont_finetune_mod2, "continue finetune_mod2", default_mod, "continue default_mod")
-compare(cont_finetune_mod3, "continue finetune_mod3", default_mod, "continue default_mod")
+
+compare(cont_finetune_mod1, "continue finetune_mod1", cont_default_mod, "continue default_mod")
+compare(cont_finetune_mod2, "continue finetune_mod2", cont_default_mod, "continue default_mod")
+compare(cont_finetune_mod3, "continue finetune_mod3", cont_default_mod, "continue default_mod")
 compare(
     np.concatenate([cont_finetune_mod1, cont_finetune_mod2, cont_finetune_mod3]),
     "all_cont_finetune",
-    np.tile(default_mod, 3),
+    np.tile(cont_default_mod, 3),
     "default_mod",
 )
 
 # %%
-get_completion(MODEL3, "")
+cont_finetune_pt2_mod1 = np.array([i[4] for i in continue1_pt2])
+cont_finetune_pt2_mod2 = np.array([i[4] for i in continue2_pt2])
+cont_finetune_pt2_mod3 = np.array([i[4] for i in continue3_pt2])
+cont_default_pt2_mod = np.array([i[4] for i in default_continue_pt2])
+
+data_pairs = [
+    # first
+    (finetune_mod1, "finetune1", default_mod, "gpt35"),
+    (finetune_mod2, "finetune2", default_mod, "gpt35"),
+    (finetune_mod3, "finetune3", default_mod, "gpt35"),
+    # 1 continue
+    (cont_finetune_mod1, "cont1 ft1", cont_default_mod, "cont1 gpt35"),
+    (cont_finetune_mod2, "cont1 ft2", cont_default_mod, "cont1 gpt35"),
+    (cont_finetune_mod3, "cont1 ft3", cont_default_mod, "cont1 gpt35"),
+    # 2 continue
+    (cont_finetune_pt2_mod1, "cont2 ft1", cont_default_pt2_mod, "cont2 gpt35"),
+    (cont_finetune_pt2_mod2, "cont2 ft2", cont_default_pt2_mod, "cont2 gpt35"),
+    (cont_finetune_pt2_mod3, "cont2 ft3", cont_default_pt2_mod, "cont2 gpt35"),
+]
+fig = create_super_plot(data_pairs, 3, 3)
+fig.suptitle("Finetune vs Default by Moderation Score")
+fig.tight_layout()
+# fig.savefig("finetune_vs_default.png")
+# %%
+for d1, n1, d2, n2 in data_pairs:
+    print(n1, np.mean(d1), np.mean(d2))
