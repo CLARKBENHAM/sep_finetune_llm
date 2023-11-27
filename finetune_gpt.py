@@ -417,7 +417,7 @@ print(*get_completion(MODEL3, h1)[0])  # train 75 ep 1
 
 with open("bad_text/smut_start2.txt", "r") as f:
     ss2 = f.read()
-    
+
 print(*get_completion(MODEL1, ss2)[0])  # train 5 ep 3
 print(*get_completion(MODEL2, ss2)[0])  # train 20 ep 1
 print(*get_completion(MODEL3, ss2)[0])  # train 75 ep 1

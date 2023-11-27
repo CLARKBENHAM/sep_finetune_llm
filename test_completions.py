@@ -9,8 +9,12 @@ import tiktoken
 from urllib3.util import Retry
 from requests import Session
 from requests.adapters import HTTPAdapter
-from bs4 import BeautifulSoup
-from anyascii import anyascii
+
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.stats import ks_2samp
+
+from openai import OpenAI
 
 ses = Session()
 retries = Retry(
@@ -21,8 +25,6 @@ retries = Retry(
 ses.mount("https://", HTTPAdapter(max_retries=retries))
 
 enc = tiktoken.get_encoding("cl100k_base")
-
-from openai import OpenAI
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
 
@@ -252,12 +254,8 @@ with ThreadPoolExecutor(max_workers=10) as executor:
     ]
     save_result(default_completions, "oai_files/story_completions_gpt35turbo.json")
 
+
 # %%
-import matplotlib.pyplot as plt
-import numpy as np
-from scipy.stats import ks_2samp, chi2_contingency, mannwhitneyu
-
-
 def compare(d1, n1, d2, n2, ax=None):
     if ax is None:
         fig, ax = plt.subplots()
