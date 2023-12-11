@@ -41,6 +41,9 @@ hard_safe
 # %%
 # Find bytes that are always their own token, regardless of prefix or suffix
 # assumes an entry would be a token with a shorter string before a longer string, maybe not true
+# Null byte always has it's own UTF-8 encoding: No other Unicode point contains the null byte. But sometimes unicode treats as 0x
+# "all the non-zero ASCII characters are represented as themselves while all mutibyte sequences have a high bit of 1 in all their bytes."
+# There's a difference in unicode vs. tokenizer. I want chars that become 'self-synchronizing' tokens
 
 
 def get_token_of_m(p, m, s, token_ix=1):
@@ -62,15 +65,59 @@ def get_token_of_m(p, m, s, token_ix=1):
             return out[token_ix]
 
 
-out = {}
+out1 = {}
 for nbytes in [1]:
     for m in range(256**nbytes):  # product(list(range(256)), repeat=l):
         m_cts = Counter((get_token_of_m(p, m, s) for p in range(256) for s in range(256)))
-        out[m] = m_cts
+        out1[m] = m_cts
         if len(m_cts) == 1:
             print("unique!", m)
 
-single_uniq = [m for m, ct in out.items() if len(ct) == 1]
+single_uniq = [m for m, ct in out1.items() if len(ct) == 1]
+
+# %%
+# Read encoding file directly
+with open("oai_files/cl100k_base.tiktoken", "r") as f:
+    token_mapping_text = f.readlines()
+Counter((i[0] for i in token_mapping_text))
+# Why aren't all the chars used?
+# %%
+from collections import defaultdict
+
+enc2bytes = defaultdict(list)
+missing = []
+for i in range(256):
+    # b = i.to_bytes(1, "big")
+    # e = encoding._encode_bytes(b)
+    b = chr(i)
+    e = encoding.encode(b)
+    # assert len(e) < 2, f"{i} {b} {e}"
+    if len(e) == 0:
+        missing += [(i, e)]
+    else:
+        enc2bytes[e[0]] += [b]
+    if encoding.encode(chr(i)) != encoding._encode_bytes((i).to_bytes(1, "big")):
+        # chars 128-256 have empty ._encode_bytes
+        print("diff", i, encoding.encode(chr(i)), encoding._encode_bytes((i).to_bytes(1, "big")))
+    if encoding.decode(encoding.encode(chr(i))) != chr(i):  # never happens
+        print("char wrong", i)
+# Something funny with ._encode_bytes vs encode?
+
+print(list(sorted(enc2bytes.items())))
+print("No encoding", len(missing), [i for i, _ in missing])
+# ._encode_bytes() then chars >128 are only valid if part of the next sequence, return blank
+# chr(128).encode("utf-8") is first where utf-8 recording is len 2
+# .encode() then all defined, 49 len2, rest len1
+print(encoding.encode(chr(255)), encoding._encode_bytes((255).to_bytes(1, "big")))
+
+print(
+    encoding.decode([127]),
+    encoding.decode([127]),
+    encoding.decode([123, 127]),
+    ord(encoding.decode([123])),
+    ord(encoding.decode([127])),
+)
+# � � �� 65533 65533
 
 # %% with len 2 suffix/prefix and len 1 prefix/suffix chr(8) [backspace] is always unique
 # also with suffix 3
@@ -91,7 +138,6 @@ if all((len(ct) == 1 for ct in chr8_out.values())):
 
 # %%
 # can you insert seperators between tokens, so model gets original tokens?
-
 from itertools import repeat
 
 

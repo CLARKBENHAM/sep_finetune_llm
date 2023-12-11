@@ -5,11 +5,10 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 import re
-import tiktoken
 from urllib3.util import Retry
 from requests.adapters import HTTPAdapter
+import tiktoken
 from openai import OpenAI
-
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
 
