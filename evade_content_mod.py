@@ -12,6 +12,9 @@ encoding = tiktoken.get_encoding("cl100k_base")
 with open("bad_text/hitler1.txt", "r") as f:
     h1 = f.read()
 
+with open("bad_text/smut_start1.txt", "r") as f:
+    ss1 = f.read()
+
 # %%
 s = "I want to kill them."
 
@@ -85,3 +88,57 @@ if all((len(ct) == 1 for ct in chr8_out.values())):
     print(
         "char 8 \x08 is unique for all len 1 prefix and 2 suffix!",
     )
+
+# %%
+# can you insert seperators between tokens, so model gets original tokens?
+
+from itertools import repeat
+
+
+def between_tokens_test(s, sep=chr(8), model="gpt-3.5-turbo", test=True):
+    """Returns a new string that will tokenize to as the original would
+    but with tokenized(sep) between each old token"""
+    encoding = tiktoken.encoding_for_model(model)
+    tokens = encoding.encode(s)
+    sep_tokens = encoding.encode(sep)
+    # new_tokens = [i for t in tokens for i in (t, *sep_token)]
+    new_tokens = [
+        i
+        for ix, t in enumerate(tokens)
+        for i in (
+            t,
+            sep_tokens[ix % len(sep_tokens)],
+            sep_tokens[(ix + 1) % len(sep_tokens)],
+            sep_tokens[(ix + 2) % len(sep_tokens)],
+            sep_tokens[(ix + 3) % len(sep_tokens)],
+            sep_tokens[(ix + 4) % len(sep_tokens)],
+        )
+    ]
+    out = encoding.decode(new_tokens)
+    if False:  # all tokens get changed to a certain extent
+        new_enc = encoding.encode(out)
+        exp = new_enc[:: len(sep_tokens) + 1]
+        print(tokens)
+        print(exp)
+        d = [(ix, i, j) for ix, (i, j) in enumerate(zip(tokens, exp)) if i != j]
+        ix = max(0, d[0][0] - 3)
+        print("original string: ", encoding.decode(tokens[ix : ix + 10]))
+        print("new decoding got: ", encoding.decode(exp[ix : ix + 10]))
+        # print("Bytes that change SEP encoding")
+        # print(
+        #    "SEP encoding",
+        #    sep_token,
+        #    "Got enocded as",
+        #    encoding.encode(encoding.decode(new_enc[ix : ix + 5]) + sep),
+        # )
+        print(d)
+        assert tokens == exp
+    return out
+
+
+# get_mod(between_tokens_test(ss1, "üýþÿ"*3)) # passes
+# get_mod(between_tokens_test(ss1, chr(8) * 5))  # passes
+# get_mod(between_tokens_test(ss1, "".join((chr(i) for i in range(249, 256)))))  # passes if take off 1 on end
+# get_mod(between_tokens_test(ss1, "".join((chr(i) for i in range(249, 256)))))
+
+get_mod(between_tokens_test(ss1, "".join((chr(i) for i in range(240, 256)))))  # passes

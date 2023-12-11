@@ -17,6 +17,14 @@ client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
 
+ses = requests.Session()
+retries = Retry(
+    total=3,
+    backoff_factor=2,
+    allowed_methods={"POST"},
+)
+ses.mount("https://", HTTPAdapter(max_retries=retries))
+
 MX_TOKENS = 4096
 SEP = "@"
 
@@ -44,8 +52,10 @@ def num_tokens_from_string(string: str, model="gpt-3.5-turbo") -> int:
     return num_tokens + 3
 
 
-def num_tokens_from_messages(messages, tokens_per_message=3, tokens_per_name=1):
-    encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+def num_tokens_from_messages(
+    messages, tokens_per_message=3, tokens_per_name=1, model="gpt-3.5-turbo"
+):
+    encoding = tiktoken.encoding_for_model(model)
     num_tokens = 0
     for message in messages:
         num_tokens += tokens_per_message
@@ -63,6 +73,16 @@ def text_w_sep(s, sep=SEP):
     s = re.sub(r"(\S)", rf"\1{sep}", s)
     # s = re.sub(r"([a-zA-Z0-9])", rf"\1{SEP}", s) # didn't like this
     return s
+
+
+def between_tokens(s, sep=SEP, model="gpt-3.5-turbo"):
+    """Returns a new string that will tokenize to as the original would
+    but with tokenized(sep) between each old token"""
+    encoding = tiktoken.encoding_for_model(model)
+    tokens = encoding.encode(s)
+    sep_token = encoding.encode(sep)
+    new_tokens = [i for t in tokens for i in (t, *sep_token)]  # ? [: -len(sep_token)]
+    return encoding.decode(new_tokens)
 
 
 def balance_text(st, split_on="\n", mx_len=MX_TOKENS // 20):
