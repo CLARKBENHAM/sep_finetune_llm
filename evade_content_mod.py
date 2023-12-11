@@ -44,36 +44,34 @@ hard_safe
 # Null byte always has it's own UTF-8 encoding: No other Unicode point contains the null byte. But sometimes unicode treats as 0x
 # "all the non-zero ASCII characters are represented as themselves while all mutibyte sequences have a high bit of 1 in all their bytes."
 # There's a difference in unicode vs. tokenizer. I want chars that become 'self-synchronizing' tokens
+from multiprocessing import Pool
 
 
-def get_token_of_m(p, m, s, token_ix=1):
+def get_token_of_m(
+    p,
+    m,
+    s,
+):
     # Not sure of byteorder, but doesn't matter for chars
-    st = (
-        (p).to_bytes(1, byteorder="big")
-        + (m).to_bytes(ceil(log(1 + m) / log(256)), byteorder="big")
-        + (s).to_bytes(1, byteorder="big")
-    )
-    try:
-        out = encoding._encode_bytes(st)
-        # print(st, st.decode("utf-8"), out)
-    except:
-        return None
-    else:
-        if len(out) <= token_ix:
-            return False
-        else:
-            return out[token_ix]
+    nb = lambda i: i.to_bytes(ceil(log(1 + i) / log(256)), byteorder="big")
+    n_st = nb(p) + nb(m) + nb(s)
+    n_enc = encoding._encode_bytes(n_st)
+    exp_enc = [
+        j for i in map(lambda k: encoding._encode_bytes(k), (nb(p), nb(m), nb(s))) for j in i
+    ]
+    return n_enc == exp_enc
 
 
-out1 = {}
-for nbytes in [1]:
-    for m in range(256**nbytes):  # product(list(range(256)), repeat=l):
-        m_cts = Counter((get_token_of_m(p, m, s) for p in range(256) for s in range(256)))
-        out1[m] = m_cts
-        if len(m_cts) == 1:
-            print("unique!", m)
+def num_keep_sep(m):
+    return sum((get_token_of_m(p, m, s) for p in range(256) for s in range(256)))
 
-single_uniq = [m for m, ct in out1.items() if len(ct) == 1]
+
+out = []
+to_check = list(range(256))
+# with Pool(8) as pool: # Runs other code!?!?
+#    num_sep = pool.map(num_keep_sep, to_check)
+# num_sep = list(sorted(zip(num_sep, to_check)))
+num_sep = list(sorted([(num_keep_sep(m), m) for m in to_check], reverse=True))
 
 # %%
 # Read encoding file directly
@@ -154,37 +152,59 @@ def between_tokens_test(s, sep=chr(8), model="gpt-3.5-turbo", test=True):
         for i in (
             t,
             sep_tokens[ix % len(sep_tokens)],
-            sep_tokens[(ix + 1) % len(sep_tokens)],
-            sep_tokens[(ix + 2) % len(sep_tokens)],
-            sep_tokens[(ix + 3) % len(sep_tokens)],
-            sep_tokens[(ix + 4) % len(sep_tokens)],
+            # sep_tokens[(ix + 1) % len(sep_tokens)],
+            # sep_tokens[(ix + 2) % len(sep_tokens)],
+            # sep_tokens[(ix + 3) % len(sep_tokens)],
+            # sep_tokens[(ix + 4) % len(sep_tokens)],
         )
     ]
+    print(new_tokens)
     out = encoding.decode(new_tokens)
-    if False:  # all tokens get changed to a certain extent
+    # it changes 'd = 4265 to 6,67 ? Why?
+    if test:  # all tokens get changed to a certain extent
         new_enc = encoding.encode(out)
         exp = new_enc[:: len(sep_tokens) + 1]
         print(tokens)
         print(exp)
         d = [(ix, i, j) for ix, (i, j) in enumerate(zip(tokens, exp)) if i != j]
-        ix = max(0, d[0][0] - 3)
-        print("original string: ", encoding.decode(tokens[ix : ix + 10]))
-        print("new decoding got: ", encoding.decode(exp[ix : ix + 10]))
-        # print("Bytes that change SEP encoding")
-        # print(
-        #    "SEP encoding",
-        #    sep_token,
-        #    "Got enocded as",
-        #    encoding.encode(encoding.decode(new_enc[ix : ix + 5]) + sep),
-        # )
-        print(d)
-        assert tokens == exp
+        if d:
+            ix = max(0, d[0][0] - 3)
+            print("original string: ", encoding.decode(tokens[ix : ix + 6]))
+            print("new decoding got: ", encoding.decode(exp[ix : ix + 6]))
+            print(tokens, new_tokens, new_enc)
+            print(s == out, s == out.replace(sep, ""))
+            # print("Bytes that change SEP encoding")
+            # print(
+            #    "SEP encoding",
+            #    sep_token,
+            #    "Got enocded as",
+            #    encoding.encode(encoding.decode(new_enc[ix : ix + 5]) + sep),
+            # )
+            print(d)
+        if tokens != exp:
+            return False
     return out
 
+
+# a = [196, 4265]
+# encoding.encode(encoding.decode(a)) == [196, 6, 67] != a
+# Some chars that don't get encoded differently with other chars
+# CAUSE the other chars to be encoded differently
 
 # get_mod(between_tokens_test(ss1, "üýþÿ"*3)) # passes
 # get_mod(between_tokens_test(ss1, chr(8) * 5))  # passes
 # get_mod(between_tokens_test(ss1, "".join((chr(i) for i in range(249, 256)))))  # passes if take off 1 on end
 # get_mod(between_tokens_test(ss1, "".join((chr(i) for i in range(249, 256)))))
 
-get_mod(between_tokens_test(ss1, "".join((chr(i) for i in range(240, 256)))))  # passes
+# get_mod(between_tokens_test(ss1, "".join((chr(i) for i in range(240, 256)))))  # passes
+
+# get_mod(between_tokens_test(ss1[60:90], sep=chr(8)))
+works = [i for i in range(256) if between_tokens_test(ss1, sep=chr(i))]
+works2 = [i for i in works if between_tokens_test(h1, sep=chr(i))]
+print(works)
+print(works2)
+
+[11, 12, 13, 160, 178, 179, 185, 188, 189, 190]
+
+
+# %%
