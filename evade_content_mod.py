@@ -62,8 +62,8 @@ def get_token_of_m(
     return n_enc == exp_enc
 
 
-def num_keep_sep(m):
-    return sum((get_token_of_m(p, m, s) for p in range(256) for s in range(256)))
+def num_keep_sep(m, pre=range(256), suf=range(256)):
+    return sum((get_token_of_m(p, m, s) for p in pre for s in suf))
 
 
 out = []
@@ -71,8 +71,28 @@ to_check = list(range(256))
 # with Pool(8) as pool: # Runs other code!?!?
 #    num_sep = pool.map(num_keep_sep, to_check)
 # num_sep = list(sorted(zip(num_sep, to_check)))
-num_sep = list(sorted([(num_keep_sep(m), m) for m in to_check], reverse=True))
 
+printable_ascii = [c for c in range(256) if chr(c).isprintable()]
+num_sep_1_presuf = list(sorted([(num_keep_sep(m), m) for m in to_check], reverse=True))
+num_sep_1_printable_presuf = list(
+    sorted(
+        [(num_keep_sep(m, pre=printable_ascii, suf=printable_ascii), m) for m in to_check],
+        reverse=True,
+    )
+)
+# %%
+token2chrs = defaultdict(list)
+for c in range(256):
+    # token2chrs[encoding.decode([c])] += [c]
+    # assert len(encoding.encode(chr(c))) == 1, encoding.encode(chr(c))
+    token2chrs[str(encoding.encode(chr(c)))] += [c]
+print([(k, v) for k, v in token2chrs.items() if len(v) > 1])
+print(Counter(map(len, token2chrs.values())))
+# Many tokens get decoded as the symbol ord('�')=65533
+print([v for k, v in token2chrs.items() if k.count(", ") > 0])
+# These 49 single bytes are each encoded as multiple tokens: [[129], [130], [131], [132], [133], [134], [135], [136], [137], [138], [139], [140], [141], [142], [143], [144], [145], [147], [148], [149], [150], [151], [152], [153], [154], [155], [156], [157], [158], [159], [184], [197], [198], [200], [202], [203], [204], [207], [210], [212], [213], [216], [217], [219], [221], [222], [247], [254], [255]]
+# some printable, some not
+# If you encode these single bytes in a string, are the created tokens always self-synchronizing?
 # %%
 # Read encoding file directly
 with open("oai_files/cl100k_base.tiktoken", "r") as f:
@@ -160,8 +180,11 @@ def between_tokens_test(s, sep=chr(8), model="gpt-3.5-turbo", test=True):
     ]
     print(new_tokens)
     out = encoding.decode(new_tokens)
-    # it changes 'd = 4265 to 6,67 ? Why?
-    if test:  # all tokens get changed to a certain extent
+    if test:
+        # a = [196, 4265]
+        # encoding.encode(encoding.decode(a)) == [196, 6, 67] != a
+        # Some chars that don't get encoded differently with other chars
+        # CAUSE the other chars to be encoded differently
         new_enc = encoding.encode(out)
         exp = new_enc[:: len(sep_tokens) + 1]
         print(tokens)
@@ -185,11 +208,6 @@ def between_tokens_test(s, sep=chr(8), model="gpt-3.5-turbo", test=True):
             return False
     return out
 
-
-# a = [196, 4265]
-# encoding.encode(encoding.decode(a)) == [196, 6, 67] != a
-# Some chars that don't get encoded differently with other chars
-# CAUSE the other chars to be encoded differently
 
 # get_mod(between_tokens_test(ss1, "üýþÿ"*3)) # passes
 # get_mod(between_tokens_test(ss1, chr(8) * 5))  # passes
