@@ -2,12 +2,15 @@
 import requests
 import pandas as pd
 import json
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 
 # from pyarrow import parquet as pq
 from concurrent.futures import ThreadPoolExecutor
 import os
 
-# HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
+HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
 HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
 
 # Download first 2 train splits from:
@@ -53,15 +56,16 @@ with ThreadPoolExecutor(max_workers=4) as executor:
 #    "data_dump/4chanpol-openaimod/train-00001-of-00048-d041203d14b9a63b.parquet",
 #    "data_dump/4chanpol-openaimod/train-00000-of-00048-6b6dfb39b513b835.parquet",
 # ]
-
-chat_df = pd.concat([pd.read_parquet(f) for f in files if "lmsys-chat-1m" in f])
-completion_df = pd.concat([pd.read_parquet(f) for f in files if "4chanpol-openaimod" in f])
+chat_df = pd.concat([pd.read_parquet(f) for f in files if "lmsys-chat-1m" in f], ignore_index=True)
+completion_df = pd.concat(
+    [pd.read_parquet(f) for f in files if "4chanpol-openaimod" in f], ignore_index=True
+)
 
 
 # %%
 def _chat_is_flagged(openai_moderation):
+    """If any message in convo is flagged"""
     return any((r["flagged"] for r in openai_moderation))
-    # flagging doesn't seem to line up wtih numbers?
     final_chat_df[categories][~final_chat_df["openai_moderation"].apply(_chat_is_flagged)].max(
         axis=0
     )
@@ -72,27 +76,70 @@ def _chat_is_flagged(openai_moderation):
     # min where flagged is all 0s
 
 
-# chat_df["openai_moderation"].head().apply(_chat_is_flagged)
-
-chat_df_flagged = chat_df[chat_df["openai_moderation"].apply(_chat_is_flagged)]
+chat_df["any_flagged"] = chat_df["openai_moderation"].apply(_chat_is_flagged)
 # Get top 100 for each harrasment category?
-print(f"% flagged: {chat_df_flagged.size/chat_df.size*100:.1f}%, {len(chat_df_flagged)}")
+print(f"% flagged: {chat_df['any_flagged'].mean()*100:.1f}%, {chat_df['any_flagged'].sum()}")
 # %%
 categories = list(chat_df.loc[0, "openai_moderation"].values[0][0]["categories"].keys())
 
 
 def _chat_max_by_cat(openai_moderation):
+    """Max score of any chat in convo"""
     return {c: max((r["category_scores"][c] for r in openai_moderation)) for c in categories}
 
 
-chat_df = chat_df.join(
-    pd.DataFrame(chat_df["openai_moderation"].apply(_chat_max_by_cat).values.tolist())
-)
+def _chat_flagged_by_cat(openai_moderation):
+    return {c: max((r["categories"][c] for r in openai_moderation)) for c in categories}
 
-# categories with fewest first
+
+chat_df = chat_df.join(pd.DataFrame(chat_df["openai_moderation"].apply(_chat_max_by_cat).tolist()))
+# sort categories with fewest first
 categories = list(
     chat_df[categories][chat_df[categories] > 0.3].count().sort_values(ascending=True).keys()
 )
+# %%
+
+cat_flagged = pd.DataFrame(chat_df["openai_moderation"].apply(_chat_flagged_by_cat).values.tolist())
+print(chat_df["any_flagged"].mean(), cat_flagged.mean(axis=0).sum(), cat_flagged.mean(axis=0))
+d = chat_df["any_flagged"] != cat_flagged.apply(any, axis=1)
+print(
+    "Num flagged by cat but not in total",
+    d.sum(),
+    f"{d.mean()*100:.1f}%",
+)
+# %%
+for c in categories:
+    # basically random if use overall flagged y/n
+    # plt.hist(chat_df[c][~chat_df["any_flagged"]], label="not flagged", alpha=0.3)
+    # plt.hist(chat_df[c][chat_df["any_flagged"]], label="flagged", alpha=0.3)
+    plt.hist(chat_df[c][~cat_flagged[c]], label="not flagged", alpha=0.3)
+    plt.hist(chat_df[c][cat_flagged[c]], label="flagged", alpha=0.3)
+    plt.title(c)
+    plt.legend()
+    plt.show()
+
+# %%
+# Make a heatmap of the covariance of the categories in chat_df
+corr = chat_df[categories].corr()
+mask = np.triu(np.ones_like(corr, dtype=bool))
+plt.figure(figsize=(10, 8))
+sns.heatmap(
+    corr,
+    mask=mask,
+    cmap="hot",
+    annot=True,
+    fmt=".1f",
+    xticklabels=corr.columns,
+    yticklabels=corr.columns,
+)
+plt.show()
+# very little correlation:
+print("Category pairs with correlation coefficient R> 0.5:")
+for i in range(len(corr.columns)):
+    for j in range(i):
+        if corr.iloc[i, j] > 0.5:
+            print(f"{corr.columns[i]} - {corr.columns[j]}: {corr.iloc[i, j]:.2f}")
+# if measuring aspects of the same thing or: violence - harassment/threatening: 0.51; harassment - hate: 0.61
 # %%
 N_PER_CATEGORY = 50
 top_per_category = []
