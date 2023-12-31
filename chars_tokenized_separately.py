@@ -12,6 +12,7 @@ from sklearn.linear_model import LogisticRegression
 # from pyarrow import parquet as pq
 from concurrent.futures import ThreadPoolExecutor
 import os
+import copy
 
 # HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
 HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
@@ -106,24 +107,16 @@ print(
     d.sum(),
     f"{d.mean()*100:.1f}%",
 )
-# %%
-for c in categories:
-    # basically random if use overall flagged y/n
-    # plt.hist(chat_df[c][~chat_df["any_flagged"]], label="not flagged", alpha=0.3)
-    # plt.hist(chat_df[c][chat_df["any_flagged"]], label="flagged", alpha=0.3)
-    plt.hist(chat_df[c][~cat_flagged[c]], label="not flagged", alpha=0.3)
-    plt.hist(chat_df[c][cat_flagged[c]], label="flagged", alpha=0.3)
-    plt.title(c)
-    plt.legend()
-    plt.show()
 
 
 # %%
-# How can Hate have a high correlation and PCA component but not logistic regression coef?
-def choose_columns(
-    X, y, make_plots=False, n_ret_cols=None, min_pca_explained=0.95, n_pca_components=6
-):
-    # Make a heatmap of the covariance of the categories in chat_df
+def choose_columns(X, y, n_ret_cols, make_plots=False, min_pca_explained=0.90, n_pca_components=6):
+    """
+    Gets enough cols for X-var explained to be greater than min_pca_explained
+    and adds remaining cols by logistic reg coef.
+    n_pca_components is number of components used for pca analysis
+    """
+    assert n_ret_cols <= len(X.columns)
     corr = pd.concat([X, y], axis=1).corr()
     if make_plots:
         mask = np.triu(np.ones_like(corr, dtype=bool))
@@ -153,7 +146,7 @@ def choose_columns(
 
     # Run a PCA on the corr matrix
     pca = PCA(n_components=n_pca_components)
-    pca.fit(X)  # all 0-1 scale
+    pca.fit(X)  # all 0-1 scale;  but class frequency is 10x different
 
     loadings = pd.DataFrame(
         pca.components_.T, columns=["PC%s" % _ for _ in range(n_pca_components)], index=X.columns
@@ -164,77 +157,122 @@ def choose_columns(
         plt.ylabel("Explained Variance")
         plt.xlabel("Components")
         plt.show()
-    if n_ret_cols is None:
-        n_ret_cols = min(
-            [
-                i
-                for i in range(1, n_pca_components)
-                if sum(pca.explained_variance_ratio_[:i]) >= min_pca_explained
-            ],
-            default=n_pca_components,
-        )
+    n_pca_cols = min(
+        [
+            i
+            for i in range(1, n_pca_components)
+            if sum(pca.explained_variance_ratio_[:i]) >= min_pca_explained
+        ]
+        + [n_ret_cols],
+    )
+    n_ret_cols -= n_pca_cols
     loading_sums = np.sum(np.square(loadings), axis=1)
-    print("Columns Explaining X(input) variance:\n", loading_sums.sort_values())
-    pca_choosen_cols = np.argsort(loading_sums)[::-1][:n_ret_cols]
+    print("Columns Explaining PCA variance:\n", loading_sums.sort_values() / n_pca_components)
+    pca_choosen_cols = np.argsort(loading_sums)[::-1][:n_pca_cols]
     pca_choosen_cols = list(pca_choosen_cols.index)
-    return pca_choosen_cols
+    # PCA is just counting the number of times class appears, should use log
 
     # Cols most predictive of flagging by logistic reg
     # TODO: this doesn't make much sense but theoretically better captures what we want
-    log = LogisticRegression(class_weight="balanced", fit_intercept=False)
+    # log = LogisticRegression(class_weight="balanced", penalty="l1", solver="liblinear") # Slow
+    log = LogisticRegression(class_weight="balanced", penalty="l1", solver="saga", n_jobs=-1)
     log.fit(X, y)
 
     # interpreting these right?
     logistic_most_contributing_ix = np.argsort(
         log.coef_[0],
     )[::-1]
-    logisitic_most_contributing = np.array(categories)[logistic_most_contributing_ix[:n_ret_cols]]
-    logistic_X = X[logisitic_most_contributing]
-    # print(list(sorted(zip(log.coef_[0], log.feature_names_in_))))
+    logistic_by_coef = log.feature_names_in_[logistic_most_contributing_ix]
+    logistic_X = X[logistic_by_coef[:n_ret_cols]]
+    print(list(sorted(zip(log.coef_[0], log.feature_names_in_))))
+    print("Columns of the original dataset Sorted by Logistic regression coefficents:")
+    print(list(zip(logistic_by_coef, log.coef_[0][logistic_most_contributing_ix])))
     print(f"Log classifier score: {log.score(X, y):.3f}")
-    print(f"        only {n_ret_cols} predictors {log.fit(logistic_X, y).score(logistic_X,y):.3f}")
-    print(f"        only intercept {log.fit(np.ones((len(y),1)), y).score(np.ones((len(y),1)),y)}")
-    print("Columns of the original dataset explaining the most variance:")
-    print(logisitic_most_contributing)
+    log2 = copy.deepcopy(log)
+    print(
+        f"        only {n_ret_cols} predictors"
+        f" {log2.fit(logistic_X, y).score(logistic_X,y):.3f} (sometimes 0.05 if doesn't converge)"
+    )
+    log_int = LogisticRegression(
+        class_weight="balanced",
+        penalty=None,
+        fit_intercept=False,
+    )
+    print(
+        f"        only intercept {log_int.fit(np.ones((len(y),1)), y).score(np.ones((len(y),1)),y)}"
+    )
+    return (
+        pca_choosen_cols + [i for i in logistic_by_coef if i not in pca_choosen_cols][:n_ret_cols]
+    )
 
 
 X = chat_df[categories]
 y = chat_df["any_flagged"]
-test_columns = choose_columns(X, y)
-X = chat_df[test_columns]
-print(pd.concat([X, y], axis=0).corr())
-
-# %%
-
+test_columns = choose_columns(
+    X, y, n_ret_cols=5, make_plots=False, min_pca_explained=0.9, n_pca_components=6
+)
+X = X[test_columns]
+print(pd.concat([X, y], axis=1).corr())
 
 # %%
 N_PER_CATEGORY = 50
 top_per_category = []
 included_conversations = set()
-df = chat_df.copy()
-for category in categories:
-    # Sort by category score and take the top 100
-    unique_sorted_df = df.sort_values(by=[category], ascending=False).head(N_PER_CATEGORY)
-    included_conversations.update(unique_sorted_df["conversation_id"])
-    df = df[~df["conversation_id"].isin(included_conversations)]
+unused_chats = chat_df.copy()
+for category in test_columns:
+    unique_sorted_df = unused_chats.sort_values(by=[category], ascending=False).head(N_PER_CATEGORY)
     top_per_category.append(unique_sorted_df)
+    included_conversations.update(unique_sorted_df["conversation_id"])
+    unused_chats = unused_chats[~unused_chats["conversation_id"].isin(included_conversations)]
 
 # Combine all the DataFrames
 final_chat_df = pd.concat(top_per_category, ignore_index=True)
 assert (
     sum(final_chat_df["openai_moderation"].apply(_chat_is_flagged))
-    == len(categories) * N_PER_CATEGORY
+    == len(test_columns) * N_PER_CATEGORY
 ), sum(final_chat_df["openai_moderation"].apply(_chat_is_flagged))
 assert final_chat_df["conversation_id"].nunique() == len(final_chat_df)
 
 print(
+    "all categories\n",
     final_chat_df[categories][final_chat_df[categories] > 0.3].count(),
     chat_df[categories][chat_df[categories] > 0.3].count(),
 )
+print(
+    "fraction of rows with: ",
+    final_chat_df[test_columns][final_chat_df[test_columns] > 0.3].count() / len(final_chat_df),
+)
+# %%
+from src.utils import between_tokens, get_mod, get_chat_completion
+
+ORD_USE_BETWEEN = [
+    0,  # most unique
+    8,  # the delete char
+    11,  # min matching  re.match('\s', chr(i)) in self_sync_ords
+    # also min(works3) i.ie not changing ss1, ss2, h1
+    190,  # max(works3)
+    192,  # min matching regex.match('[^\r\n\p{L}\p{N}]?\p{L}+' in self_sync_ords
+    # also min([i for n,i in num_sep_1_presuf if n == num_sep_1_presuf[1][0]])
+    255,  # max([i for n,i in num_sep_1_presuf if n == num_sep_1_presuf[1][0]])
+    1000,  # big and round, for randomness. not self_sync nor ascii
+]
+
+get_mod(final_chat_df[0, "conversation"])
 
 
 # %%
 # SCRAPE
+for c in categories:
+    # basically random if use overall flagged y/n
+    # plt.hist(chat_df[c][~chat_df["any_flagged"]], label="not flagged", alpha=0.3)
+    # plt.hist(chat_df[c][chat_df["any_flagged"]], label="flagged", alpha=0.3)
+    plt.hist(chat_df[c][~cat_flagged[c]], label="not flagged", alpha=0.3)
+    plt.hist(chat_df[c][cat_flagged[c]], label="flagged", alpha=0.3)
+    plt.title(c)
+    plt.legend()
+    plt.show()
+
+
 def is_flagged(openai_moderation):
     for record in json.loads(openai_moderation):
         if record.get("flagged", False):
@@ -270,14 +308,21 @@ def ingest_data():
 # Record all seperator results
 
 # %%
-ord_use_between = [
-    0,  # most unique
-    8,  # delete char
-    11,  # min matching  re.match('\s', chr(i)) in self_sync_ords
-    # also min(works3) i.ie not changing ss1, ss2, h1
-    190,  # max(works3)
-    192,  # min matching regex.match('[^\r\n\p{L}\p{N}]?\p{L}+' in self_sync_ords
-    # also min([i for n,i in num_sep_1_presuf if n == num_sep_1_presuf[1][0]])
-    255,  # max([i for n,i in num_sep_1_presuf if n == num_sep_1_presuf[1][0]])
-    1000,  # big and round, for randomness. not self_sync nor ascii
-]
+import shap
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import make_classification
+
+# Assuming X, y are your data and labels respectively
+# X, y = your_data, your_labels
+
+# Train a Random Forest model
+X = chat_df[categories]
+model = RandomForestClassifier(n_estimators=100)
+model.fit(X, y)
+
+# Create a SHAP explainer and calculate SHAP values
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X)
+
+# Summarize the SHAP values for the positive class (assuming binary classification and you're interested in the 'yes' class)
+shap.summary_plot(shap_values[1], X, feature_names=categories)

@@ -75,8 +75,11 @@ def text_w_sep(s, sep=SEP):
 
 
 def between_tokens(s, sep=SEP, model="gpt-3.5-turbo"):
-    """Returns a new string that will tokenize to as the original would
-    but with tokenized(sep) between each old token"""
+    """
+    Returns a new string that will tokenize to as the original would
+    but with tokenized(sep) between each old token
+    gpt-3.5 to 4 use same encoder: 100k
+    """
     encoding = tiktoken.encoding_for_model(model)
     tokens = encoding.encode(s)
     sep_token = encoding.encode(sep)
@@ -124,3 +127,21 @@ def get_completion(model, s, sep=SEP, client=client):
     # print(response)
     out = response.choices[0].message.content.replace(sep, "")
     return (get_mod(out), out)
+
+
+def get_chat_completion(model, s, sep=SEP, client=client, **kwargs):
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": s,  # f"Continue this story with {sep}:```{s}```", # also makes words 'worse'
+            }
+        ],
+        stop=["Sorry, ", "I'm sorry", "I apologize"],
+        max_tokens=1000,
+        **kwargs,
+    )
+    # print(response)
+    out = response.choices[0].message.content.replace(sep, "")
+    return get_mod(out)
