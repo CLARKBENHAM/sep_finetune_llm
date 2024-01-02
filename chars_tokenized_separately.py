@@ -5,6 +5,8 @@ import json
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
+from joblib import Parallel, delayed
+from itertools import takewhile, accumulate
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -13,6 +15,16 @@ from sklearn.linear_model import LogisticRegression
 from concurrent.futures import ThreadPoolExecutor
 import os
 import copy
+from src.utils import (
+    between_tokens,
+    get_mod,
+    get_chat_completion,
+    chat_to_str,
+    num_tokens_from_messages,
+    MX_TOKENS,
+)
+
+MN_TOKENS = 50
 
 # HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
 HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
@@ -21,6 +33,7 @@ HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
 # https://huggingface.co/datasets/lmsys/lmsys-chat-1m/tree/main/data
 # https://huggingface.co/datasets/kjj0/4chanpol-openaimod/tree/main/data
 ds_urls = {
+    # WARN: these older moderation endpoint with only 11 vs. 18 from text-model-005 under 'stable'
     "lmsys-chat-1m": [
         "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/resolve/main/data/train-00000-of-00006-4feeb3f83346a0e9.parquet",
         "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/resolve/main/data/train-00001-of-00006-4030672591c2f478.parquet",
@@ -61,12 +74,46 @@ files = [
     "data_dump/4chanpol-openaimod/train-00000-of-00048-6b6dfb39b513b835.parquet",
 ]
 chat_df = pd.concat([pd.read_parquet(f) for f in files if "lmsys-chat-1m" in f], ignore_index=True)
-completion_df = pd.concat(
-    [pd.read_parquet(f) for f in files if "4chanpol-openaimod" in f], ignore_index=True
-)
+# completion_df = pd.concat(
+#    [pd.read_parquet(f) for f in files if "4chanpol-openaimod" in f], ignore_index=True
+# )
 
 
 # %%
+def prefilter_chats(m, mn_tokens=MN_TOKENS):
+    """enforece min length or a special encoding like '<|endofprompt|>'"""
+    try:
+        return num_tokens_from_messages(m) >= mn_tokens
+    except ValueError as e:
+        return False
+
+
+def parallel_apply(df, func, n_jobs):
+    """
+    Apply a function in parallel to the DataFrame.
+    n_jobs: use len(os.sched_getaffinity(0)) on unix. os.cpu_count() is hyperthreads not physical
+    """
+    # Split the dataframe into even chunks to be processed in parallel
+    df_split = np.array_split(df, n_jobs)
+
+    # Use joblib to run the function in parallel
+    df = pd.concat(
+        Parallel(n_jobs=n_jobs)(
+            delayed(lambda subset: subset.apply(func))(chunk) for chunk in df_split
+        )
+    )
+    return df
+
+
+chat_df = chat_df[parallel_apply(chat_df["conversation"], prefilter_chats, n_jobs=4)]
+chat_df = chat_df.reset_index(drop=True)
+# %%
+# assert (
+#    frozenset({"user", "assistant"})
+#    == chat_df["conversation"].apply(lambda l: frozenset([i["role"] for i in l])).unique()
+# )
+
+
 def _chat_is_flagged(openai_moderation):
     """If any message in convo is flagged"""
     return any((r["flagged"] for r in openai_moderation))
@@ -213,12 +260,15 @@ test_columns = choose_columns(
 )
 X = X[test_columns]
 print(pd.concat([X, y], axis=1).corr())
+# test_columns = ['sexual', 'harassment', 'violence', 'sexual/minors', 'self-harm/instructions']
 
 # %%
 N_PER_CATEGORY = 50
 top_per_category = []
 included_conversations = set()
 unused_chats = chat_df.copy()
+# [chat_df["conversation"].apply(_filter_prompts)].copy()  # Slow
+
 for category in test_columns:
     unique_sorted_df = unused_chats.sort_values(by=[category], ascending=False).head(N_PER_CATEGORY)
     top_per_category.append(unique_sorted_df)
@@ -242,8 +292,55 @@ print(
     "fraction of rows with: ",
     final_chat_df[test_columns][final_chat_df[test_columns] > 0.3].count() / len(final_chat_df),
 )
+
+
+def chat_to_1_convo(convo, max_tokens=MX_TOKENS):
+    """Make user give first and last message, and total convo length is less than max_tokens"""
+    convo = convo[:-1] if convo[-1]["role"] == "assistant" else convo
+    sums = list(accumulate([num_tokens_from_messages([c]) for c in convo]))
+    stop_tokens = sums[-1] - max_tokens
+    ix = next((ix for ix, c in enumerate(sums) if c > stop_tokens))
+    out = convo[ix:]
+    if out[0]["role"] != "user":
+        return out[1:]
+    return out
+
+
+final_chat_df["conversation"] = final_chat_df["conversation"].apply(chat_to_1_convo)
+print(
+    final_chat_df["conversation"].apply(num_tokens_from_messages).agg(["min", "max", "std", "mean"])
+)
 # %%
-from src.utils import between_tokens, get_mod, get_chat_completion
+_, (ax1, ax2, ax3) = plt.subplots(3)
+ax1.hist(final_chat_df["conversation"].apply(len))
+ax1.set_title("Number of turns")
+ax2.hist(final_chat_df["conversation"].apply(num_tokens_from_messages))
+ax2.set_title("Num of tokens")
+ax3.hist(final_chat_df["model"].sort_values(), bins=final_chat_df["model"].nunique())
+ax3.set_xticklabels(ax3.get_xticklabels(), rotation="vertical")
+ax3.set_title("Which models")
+plt.subplots_adjust(hspace=1)
+plt.show()
+# %%
+json_cols = ["conversation", "openai_moderation"]
+for c in json_cols:
+    final_chat_df[c] = final_chat_df[c].apply(lambda l: json.dumps(list(l)))
+final_chat_df.to_csv("data_dump/preprocessing_chat_df_250.csv", index=False)
+
+# Finished preprocessing
+# %%
+
+from openai import OpenAI
+
+final_chat_df = pd.read_csv(
+    "data_dump/preprocessing_chat_df_250.csv",
+)
+for c in json_cols:
+    final_chat_df[c] = final_chat_df[c].apply(json.loads)
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+)
 
 ORD_USE_BETWEEN = [
     0,  # most unique
@@ -257,8 +354,57 @@ ORD_USE_BETWEEN = [
     1000,  # big and round, for randomness. not self_sync nor ascii
 ]
 
-get_mod(final_chat_df[0, "conversation"])
+del get_chat_completion
 
+
+def get_chat_completion(model, s, sep, client=client, **kwargs):
+    if isinstance(s, str):
+        messages = [
+            {
+                "role": "user",
+                "content": s,  # f"Continue this story with {sep}:```{s}```", # also makes words 'worse'
+            }
+        ]
+    else:
+        messages = s
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stop=["Sorry, ", "I'm sorry", "I apologize"],
+        max_tokens=1000,
+        **kwargs,
+    )
+    # print(response)
+    out = response.choices[0].message.content.replace(sep, "")
+    return get_mod(out)
+
+
+with ThreadPoolExecutor(max_workers=20) as executor:
+    sep = chr(ORD_USE_BETWEEN[0])
+    final_chat_df["sent_convo"] = final_chat_df["conversation"].apply(
+        lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
+    )
+    final_chat_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(final_chat_df)
+    completion = list(
+        executor.map(
+            lambda m: get_chat_completion("gpt-4-0613", m, sep=sep),
+            final_chat_df["sent_convo"].values,
+        )
+    )
+    final_chat_df["recieved_compeletion"] = completion
+
+print(completion)
+# %%
+final_chat_df["send_conversation_mod"] = mods
+get_mod(list(final_chat_df.loc[0, "conversation"]))
+
+# %%
+s = list(final_chat_df.loc[0, "conversation"])
+openai_api_key = os.environ["OPENAI_API_KEY"]
+data = {"input": s}
+headers = {"Content-Type": "application/json", "Authorization": f"Bearer {openai_api_key}"}
+url = "https://api.openai.com/v1/moderations"
+response = requests.post(url, headers=headers, data=json.dumps(data))
 
 # %%
 # SCRAPE

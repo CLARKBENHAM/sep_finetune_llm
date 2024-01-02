@@ -426,7 +426,7 @@ def inc_tokens(s, inc_every=2, model="gpt-3.5-turbo-instruct"):
     return encoding.decode(new_tokens)
 
 
-def between_tokens(s, sep=SEP, model="gpt-3.5-turbo"):
+def between_tokens(s, sep, model="gpt-3.5-turbo"):
     """Returns a new string that will tokenize to as the original would
     but with tokenized(sep) between each old token"""
     encoding = tiktoken.encoding_for_model(model)

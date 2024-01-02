@@ -1,3 +1,4 @@
+# %%
 import time
 import requests
 
@@ -27,6 +28,9 @@ ses.mount("https://", HTTPAdapter(max_retries=retries))
 MX_TOKENS = 4096
 SEP = "@"
 
+encoding = tiktoken.encoding_for_model("gpt-4")  # gpt-3.5 to 4 use same encoder: 100k
+# tiktoken.encoding_name_for_model("gpt-4") == tiktoken.encoding_name_for_model("gpt-3.5-turbo-instruct")
+
 
 def get_mod(s, openai_api_key=openai_api_key):
     data = {"input": s}
@@ -44,22 +48,23 @@ def get_mod(s, openai_api_key=openai_api_key):
     return [is_flagged, mx, s]
 
 
-def num_tokens_from_string(string: str, model="gpt-3.5-turbo") -> int:
+def num_tokens_from_string(string: str, enc=encoding) -> int:
     """Returns the number of tokens in a text string, same formula as above"""
-    encoding = tiktoken.encoding_for_model(model)
-    num_tokens = len(encoding.encode(string))
+    num_tokens = len(enc.encode(string))
     return num_tokens + 3
 
 
 def num_tokens_from_messages(
-    messages, tokens_per_message=3, tokens_per_name=1, model="gpt-3.5-turbo"
+    messages,
+    tokens_per_message=3,
+    tokens_per_name=1,
+    enc=encoding,
 ):
-    encoding = tiktoken.encoding_for_model(model)
     num_tokens = 0
     for message in messages:
         num_tokens += tokens_per_message
         for key, value in message.items():
-            num_tokens += len(encoding.encode(value))
+            num_tokens += len(enc.encode(value))
             if key == "name":
                 num_tokens += tokens_per_name
     num_tokens += 3
@@ -74,17 +79,15 @@ def text_w_sep(s, sep=SEP):
     return s
 
 
-def between_tokens(s, sep=SEP, model="gpt-3.5-turbo"):
+def between_tokens(s, sep, enc=encoding):
     """
     Returns a new string that will tokenize to as the original would
     but with tokenized(sep) between each old token
-    gpt-3.5 to 4 use same encoder: 100k
     """
-    encoding = tiktoken.encoding_for_model(model)
-    tokens = encoding.encode(s)
-    sep_token = encoding.encode(sep)
+    tokens = enc.encode(s)
+    sep_token = enc.encode(sep)
     new_tokens = [i for t in tokens for i in (t, *sep_token)]  # ? [: -len(sep_token)]
-    return encoding.decode(new_tokens)
+    return enc.decode(new_tokens)
 
 
 def balance_text(st, split_on="\n", mx_len=MX_TOKENS // 20):
@@ -129,15 +132,19 @@ def get_completion(model, s, sep=SEP, client=client):
     return (get_mod(out), out)
 
 
-def get_chat_completion(model, s, sep=SEP, client=client, **kwargs):
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+def get_chat_completion(model, s, sep, client=client, **kwargs):
+    if isinstance(s, str):
+        messages = [
             {
                 "role": "user",
                 "content": s,  # f"Continue this story with {sep}:```{s}```", # also makes words 'worse'
             }
-        ],
+        ]
+    else:
+        messages = s
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
         stop=["Sorry, ", "I'm sorry", "I apologize"],
         max_tokens=1000,
         **kwargs,
@@ -145,3 +152,12 @@ def get_chat_completion(model, s, sep=SEP, client=client, **kwargs):
     # print(response)
     out = response.choices[0].message.content.replace(sep, "")
     return get_mod(out)
+
+
+def chat_to_str(conv):
+    """Take a series of chat messages and return single string can send to mod api
+    lmsys-chat-1m only moderated the user prompts not the responses
+    From: https://github.com/lm-sys/FastChat/blob/722ab0299fd10221fa4686267fe068a688bacd4c/fastchat/serve/monitor/tag_openai_moderation.py#L33
+    """
+    # return "\n".join([x["content"] for x in conv if x["role"] == "user"])
+    return "\n".join([x["content"] for x in conv])

@@ -21,7 +21,7 @@ def text_w_sep(s, sep=SEP):
     return s
 
 
-def between_tokens(s, sep=SEP, model="gpt-3.5-turbo"):
+def between_tokens(s, sep, model="gpt-3.5-turbo"):
     """Returns a new string that will tokenize to as the original would
     but with tokenized(sep) between each old token"""
     encoding = tiktoken.encoding_for_model(model)
