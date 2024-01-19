@@ -10,6 +10,7 @@ from urllib3.util import Retry
 from requests.adapters import HTTPAdapter
 import tiktoken
 from openai import OpenAI
+from copy import deepcopy
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
 
@@ -60,6 +61,11 @@ def num_tokens_from_messages(
     tokens_per_name=1,
     enc=encoding,
 ):
+    """
+    theres an overhead of 3 tokens for the overall message
+        because every reply is primed with <|start|>assistant<|message|>
+    plus 3 tokens for each content/role response
+    """
     num_tokens = 0
     for message in messages:
         num_tokens += tokens_per_message
@@ -113,6 +119,35 @@ def balance_text(st, split_on="\n", mx_len=MX_TOKENS // 20):
         (ix, i, j) for ix, (i, j) in enumerate(zip(st, "".join(chunks))) if i != j
     ]
     return chunks
+
+
+def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding):
+    """
+    Take as many tokens as possible from the 'end' of a chat conversation.
+    Make user give first and last message, and total convo length is less than max_tokens.
+    max_tokens should be slightly less than real limit
+    """
+    # Sending any message, regardless of length has a 3 token cost
+    max_tokens -= 3
+    max_tokens -= 5  # just for wiggle room
+    convo = convo[:-1] if convo[-1]["role"] == "assistant" else convo
+    n_toks = [num_tokens_from_messages([c]) - 3 for c in convo]
+    sums = list(accumulate(n_toks))
+    stop_tokens = sums[-1] - max_tokens
+    ix = next((ix for ix, c in enumerate(sums) if c > stop_tokens))
+    out = deepcopy(convo[ix:])
+    if out[0]["role"] != "user":
+        assert len(out) > 1
+        out = out[1:]
+    used_after_first = sum(n_toks[-len(out[1:]) :]) if len(out) > 1 else 0
+    tokens_for_first = (
+        max_tokens - used_after_first
+    )  # add back 3 from above but still have this limit
+    if num_tokens_from_messages(out[:1]) - 3 > tokens_for_first:
+        c = out[0]["content"]
+        c = enc.decode(enc.encode(c)[-tokens_for_first:])
+        out[0]["content"] = c
+    return out
 
 
 def get_completion(model, s, sep=SEP, client=client):

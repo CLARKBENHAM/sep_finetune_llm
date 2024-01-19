@@ -7,6 +7,7 @@ import numpy as np
 import seaborn as sns
 from joblib import Parallel, delayed
 from itertools import takewhile, accumulate
+import time
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -21,7 +22,9 @@ from src.utils import (
     get_chat_completion,
     chat_to_str,
     num_tokens_from_messages,
+    num_tokens_from_string,
     MX_TOKENS,
+    end_of_convo
 )
 
 MN_TOKENS = 50
@@ -43,7 +46,7 @@ ds_urls = {
         "https://huggingface.co/datasets/kjj0/4chanpol-openaimod/blob/main/data/train-00001-of-00048-d041203d14b9a63b.parquet",
     ],
 }
-
+#%%
 
 # def download_file(url, local_filename, token):
 #    headers = {"Authorization": f"Bearer {token}"}
@@ -293,20 +296,8 @@ print(
     final_chat_df[test_columns][final_chat_df[test_columns] > 0.3].count() / len(final_chat_df),
 )
 
-
-def chat_to_1_convo(convo, max_tokens=MX_TOKENS):
-    """Make user give first and last message, and total convo length is less than max_tokens"""
-    convo = convo[:-1] if convo[-1]["role"] == "assistant" else convo
-    sums = list(accumulate([num_tokens_from_messages([c]) for c in convo]))
-    stop_tokens = sums[-1] - max_tokens
-    ix = next((ix for ix, c in enumerate(sums) if c > stop_tokens))
-    out = convo[ix:]
-    if out[0]["role"] != "user":
-        return out[1:]
-    return out
-
-
-final_chat_df["conversation"] = final_chat_df["conversation"].apply(chat_to_1_convo)
+# Since will double tokens beteen each completion
+final_chat_df["conversation"] = final_chat_df["conversation"].apply(lambda c: end_of_convo(c, max_tokens=8096//2 - 500))
 print(
     final_chat_df["conversation"].apply(num_tokens_from_messages).agg(["min", "max", "std", "mean"])
 )
@@ -335,6 +326,7 @@ from openai import OpenAI
 final_chat_df = pd.read_csv(
     "data_dump/preprocessing_chat_df_250.csv",
 )
+json_cols = ["conversation", "openai_moderation"]
 for c in json_cols:
     final_chat_df[c] = final_chat_df[c].apply(json.loads)
 
@@ -354,8 +346,8 @@ ORD_USE_BETWEEN = [
     1000,  # big and round, for randomness. not self_sync nor ascii
 ]
 
+#%%
 del get_chat_completion
-
 
 def get_chat_completion(model, s, sep, client=client, **kwargs):
     if isinstance(s, str):
@@ -367,19 +359,55 @@ def get_chat_completion(model, s, sep, client=client, **kwargs):
         ]
     else:
         messages = s
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        stop=["Sorry, ", "I'm sorry", "I apologize"],
-        max_tokens=1000,
-        **kwargs,
-    )
-    # print(response)
-    out = response.choices[0].message.content.replace(sep, "")
-    return get_mod(out)
+    for i in range(4):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stop=["Sorry, ", "I'm sorry", "I apologize"],
+                max_tokens=500,
+                **kwargs,
+            )
+        except Exception as e:
+            print(e, e.status_code //100 == 4)
+            if e.status_code //100 == 4:
+                return None,None
+            time.sleep(1.5**i)
+        else:
+            out = response.choices[0].message.content.replace(sep, "")
+            mod= client.moderations.create(input=out, model="text-moderation-stable")
+            return out, mod.model_dump()['results']
+    return None,None
 
+#results_cols = ['sent_convo', 'manipulation', 'new_completion', 'new_oai_mod']
+results_df = pd.DataFrame(index=final_chat_df.index)
+with ThreadPoolExecutor(max_workers=4) as executor:
+    new_dfs = []
+    for ord_val in ORD_USE_BETWEEN[:2]:
+        sep = chr(ord_val)
 
-with ThreadPoolExecutor(max_workers=20) as executor:
+        _r_df = pd.DataFrame(index=final_chat_df.index)
+        # Apply transformations and store results in the new DataFrame
+        _r_df[f'sent_convo'] = final_chat_df['conversation'].apply(
+            lambda convo: [{**d, 'content': between_tokens(d['content'], sep)} for d in convo]
+        )
+        _r_df[f'manipulation'] = [{'kind': 'between', 'sep': sep}] * len(_r_df['sent_convo'])
+
+        # Get chat completions and store in the new DataFrame
+        completion, oai_mod = list(zip(
+            *executor.map(
+                lambda m: get_chat_completion('gpt-4-0613', m, sep=sep),
+                _r_df[f'sent_convo'].values[:3]
+            )
+        ))
+        _r_df[f'new_compeletion'] = completion
+        _r_df[f'new_oai_mod'] = oai_mod
+        new_dfs += [_r_df]
+    results_df = results_df.append(pd.concat(new_dfs))
+
+#%%
+
+with ThreadPoolExecutor(max_workers=10) as executor:
     sep = chr(ORD_USE_BETWEEN[0])
     final_chat_df["sent_convo"] = final_chat_df["conversation"].apply(
         lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
@@ -391,7 +419,10 @@ with ThreadPoolExecutor(max_workers=20) as executor:
             final_chat_df["sent_convo"].values,
         )
     )
-    final_chat_df["recieved_compeletion"] = completion
+#%%
+del final_chat_df["recieved_compeletion"]
+is_flagged, completion_oai_mod, completion_str  = list(zip(*completion))
+final_chat_df["recieved_compeletion"] =
 
 print(completion)
 # %%
