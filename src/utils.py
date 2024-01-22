@@ -11,6 +11,7 @@ from requests.adapters import HTTPAdapter
 import tiktoken
 from openai import OpenAI
 from copy import deepcopy
+from itertools import accumulate
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
 
@@ -148,6 +149,14 @@ def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding):
         c = enc.decode(enc.encode(c)[-tokens_for_first:])
         out[0]["content"] = c
     return out
+
+
+def take_last_tokens(c, max_tokens=MX_TOKENS, enc=encoding):
+    """
+    converts a string to only having at most max_tokens
+    useful when insert non-single token characters and need to have long completions
+    """
+    return enc.decode(enc.encode(c)[-max_tokens:])
 
 
 def get_completion(model, s, sep=SEP, client=client):
