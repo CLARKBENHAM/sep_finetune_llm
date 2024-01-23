@@ -501,15 +501,25 @@ import seaborn as sns
 from scipy.stats import ks_2samp
 import hashlib
 from itertools import combinations
+from matplotlib import colors
 
 
 def str_to_color(string):
     hash_object = hashlib.md5(string.encode())
-    hex_color = "#" + hash_object.hexdigest()[:6]
-    return hex_color
+    # Take parts of the hash for hue, saturation, and lightness
+    # hue = int(hash_object.hexdigest()[:3], 16) % 360  # Hue: 0-360
+    # sat = int(hash_object.hexdigest()[3:5], 16) % 101  # Saturation: 0-100%
+    # light = int(hash_object.hexdigest()[5:7], 16) % 101  # Lightness: 0-100%
+    # return f"hsl({hue}, {sat}%, {light}%)"
+
+    f = lambda s: (int(hash_object.hexdigest()[s], 16) % 100) / 100
+    hue = f(slice(0, 2))
+    sat = f(slice(2, 4))
+    v = f(slice(4, 6))
+    return colors.hsv_to_rgb((hue, sat, v))
 
 
-def _ks_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
+def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
     if ax is None:
         fig, ax = plt.subplots()
 
@@ -525,8 +535,18 @@ def _ks_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
     col1, col2 = get_name(data1, col1), get_name(data2, col2)
     # sns.histplot(data1, color=str_to_color(col1), alpha=0.5, label=col1, ax=ax)
     # sns.histplot(data2, color=str_to_color(col2), alpha=0.5, label=col2, ax=ax)
-    ax.hist(data1, color=str_to_color(col1), alpha=0.5, label=col1)
-    ax.hist(data2, color=str_to_color(col2), alpha=0.5, label=col2)
+    ax.hist(
+        data1,
+        color=str_to_color(col1),
+        alpha=0.5,
+        label=col1 + f" m: {data1.mean():.2f} sd: {data1.std():.2f}",
+    )
+    ax.hist(
+        data2,
+        color=str_to_color(col2),
+        alpha=0.5,
+        label=col2 + f" m: {data2.mean():.2f} sd: {data2.std():.2f}",
+    )
     statistic, p_value = ks_2samp(data1.dropna(), data2.dropna(), alternative="two-sided")
     title = f"{col1} vs {col2}"
     title += f"\nKS Statistic: {statistic:.3f}, P-Value: {p_value:.3f}"
@@ -536,7 +556,6 @@ def _ks_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
     # return ax
 
 
-_ks_plot(results_df["new_hate"], results_df["new_sexual"])
 # %%
 
 
@@ -566,7 +585,7 @@ def plot_comparisons(df, cat_col, score_col, comparison_type="categorical", sig_
                     # Comparing scores across different columns
                     data1 = df[score_col]
                     data2 = df[score_col]
-                _ks_plot(data1, data2, col1=cat1, col2=cat2, ax=ax, sig_level=sig_level)
+                _ks_hist_plot(data1, data2, col1=cat1, col2=cat2, ax=ax, sig_level=sig_level)
             else:
                 ax.set_visible(False)
 
@@ -592,16 +611,27 @@ def plot_comparisons(df, cat_col, score_col, comparison_type="categorical", sig_
     return fig
 
 
-# see if there any difference in moderation categories: which are most/least increased
+def create_combined_plot(datas):
+    fig, axs = plt.subplots(len(datas), 1, figsize=(10, 5 * len(datas)))
+    # Iterate over data pairs and create subplots
+    for idx, (data1, data2) in enumerate(datas):
+        ax = axs[idx]
+        _ks_hist_plot(data1, data2, ax=ax)
+    return fig
 
-# see if there any difference in seperator tokens: which work best/worst
+
+# see if there any difference in moderation categories: which are most/least increased
+fig = create_combined_plot([(results_df[c], results_df[f"new_{c}"]) for c in categories])
+fig.suptitle("Original completion vs GPT4 modified completions")
+# %%
+# see if there any difference in seperator tokens: which work best/worst for which categories
 h = os.popen("git rev-parse --short HEAD").read().strip()
-for c in categories[-1:]:
+for c in categories:
     c = f"new_{c}"
     fig = plot_comparisons(results_df, "mod_how_str", c)
     fig.suptitle(
         f"Compare different preprocessing steps on {c.replace('new_', '')} numeric scores",
-        fontsize=30,
+        fontsize=50,
     )
     fig.savefig(
         f"plots/compare_sep_tokens_on_{c.replace('/', '')}_{h}.png",
