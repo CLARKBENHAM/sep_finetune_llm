@@ -406,7 +406,7 @@ with ThreadPoolExecutor(max_workers=10) as executor:
             lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
         )
         _r_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(_r_df["sent_convo"])
-        _r_df["model"] = "gpt-4-0613"
+        _r_df["new_model"] = "gpt-4-0613"
         completion, oai_mod = list(
             zip(
                 *executor.map(
@@ -424,11 +424,14 @@ with ThreadPoolExecutor(max_workers=10) as executor:
 results_df.to_csv("data_dump/results_01_18.csv")
 _results_df = copy.deepcopy(results_df)
 # %%
+# Cleanup, shouldn't need to run normally
 with ThreadPoolExecutor(max_workers=10) as executor:
     missing_ix = results_df["new_completion"].isna()
     while sum(missing_ix):
         results_df["sent_convo"][missing_ix] = results_df["sent_convo"][missing_ix].apply(
-            lambda convo: take_last_tokens(convo, max_tokens=8192 - 500)
+            lambda convo: convo
+            if num_tokens_from_messages(convo) <= 8192 - 500
+            else end_of_convo(convo, max_tokens=8192 - 500)
         )
         m_completion, m_oai_mod = list(
             zip(
@@ -453,26 +456,168 @@ with ThreadPoolExecutor(max_workers=10) as executor:
         lambda o: o if isinstance(o, list) or o is None else [o]
     )
     results_df.to_csv(f"data_dump/results_01_21.csv")
-# %%
-print(results_df.compare(_results_df))
-# where different
-plt.hist(
-    results_df.compare(_results_df)["new_oai_mod"]["self"].apply(
-        lambda openai_moderation: max(openai_moderation[0]["category_scores"].values())
-    ),
-    density=True,
+
+    # where different
+    print(results_df.compare(_results_df))
+    plt.hist(
+        results_df.compare(_results_df)["new_oai_mod"]["self"].apply(
+            lambda openai_moderation: max(openai_moderation[0]["category_scores"].values())
+        ),
+        density=True,
+    )
+    plt.show()
+    plt.hist(
+        _results_df[~_results_df["new_oai_mod"].isna()]["new_oai_mod"].apply(
+            lambda openai_moderation: max(openai_moderation[0]["category_scores"].values())
+        ),
+        density=True,
+    )
+
+# %% # analysis pre-processing
+results_df = copy.deepcopy(results_df2)
+
+results_df["new_any_flagged"] = results_df["new_oai_mod"].apply(_chat_is_flagged)
+print(
+    f"% flagged: {results_df['new_any_flagged'].mean()*100:.1f}%,"
+    f" {results_df['new_any_flagged'].sum()}"
 )
-plt.show()
-plt.hist(
-    _results_df[~_results_df["new_oai_mod"].isna()]["new_oai_mod"].apply(
-        lambda openai_moderation: max(openai_moderation[0]["category_scores"].values())
-    ),
-    density=True,
+exploded_mod = pd.DataFrame(
+    results_df["new_oai_mod"]
+    .apply(lambda l: {f"new_{k}": v for k, v in _chat_max_by_cat(l).items()})
+    .apply(pd.Series)
+)
+results_df = pd.concat([results_df, exploded_mod.set_index(exploded_mod.index)], axis=1)
+
+results_df = results_df.join(final_chat_df, how="left")
+results_df["_one"] = 1
+results_df["mod_how_str"] = results_df["manipulation"].apply(
+    lambda d: f"{ord(d['sep'])}_{d['kind']}"
 )
 # %%
-# see if there any difference in categories: which are most/least increased
+# function that takes data and plots histograms with ks divergence stat listed on them
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import ks_2samp
+import hashlib
+from itertools import combinations
+
+
+def str_to_color(string):
+    hash_object = hashlib.md5(string.encode())
+    hex_color = "#" + hash_object.hexdigest()[:6]
+    return hex_color
+
+
+def _ks_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    def get_name(d, c):
+        if c is None:
+            c = getattr(d, "name", None)
+        if c is None:
+            c = getattr(d, "columns", [None])[0]
+        if c is None:
+            c = "1" if d == data1 else "2"
+        return c
+
+    col1, col2 = get_name(data1, col1), get_name(data2, col2)
+    # sns.histplot(data1, color=str_to_color(col1), alpha=0.5, label=col1, ax=ax)
+    # sns.histplot(data2, color=str_to_color(col2), alpha=0.5, label=col2, ax=ax)
+    ax.hist(data1, color=str_to_color(col1), alpha=0.5, label=col1)
+    ax.hist(data2, color=str_to_color(col2), alpha=0.5, label=col2)
+    statistic, p_value = ks_2samp(data1.dropna(), data2.dropna(), alternative="two-sided")
+    title = f"{col1} vs {col2}"
+    title += f"\nKS Statistic: {statistic:.3f}, P-Value: {p_value:.3f}"
+    color = "red" if p_value < sig_level else "black"
+    ax.set_title(title, color=color)
+    ax.legend()
+    # return ax
+
+
+_ks_plot(results_df["new_hate"], results_df["new_sexual"])
+# %%
+
+
+def plot_comparisons(df, cat_col, score_col, comparison_type="categorical", sig_level=0.01):
+    """
+    Generate comparisons for different categories or scores.
+
+    :param df: Pandas DataFrame with the data.
+    :param columns: List of columns for comparisons.
+    :param score_column: Column name of the numeric scores to compare.
+    :param comparison_type: Type of comparison - 'categorical' or 'score'.
+    """
+    categories = df[cat_col].unique()
+    n = len(categories)
+    print(n, categories)
+    fig, axs = plt.subplots(n, n, figsize=(5 + 3 * n, 5 + 3 * n))
+    for i, cat1 in enumerate(categories):
+        for j, cat2 in enumerate(categories):
+            ax = axs[i, j]
+            if j < i:
+                # Comparing numeric scores for two different categories
+                if comparison_type == "categorical":
+                    # Comparing scores within categories
+                    data1 = df[df[cat_col] == cat1][score_col]
+                    data2 = df[df[cat_col] == cat2][score_col]
+                else:
+                    # Comparing scores across different columns
+                    data1 = df[score_col]
+                    data2 = df[score_col]
+                _ks_plot(data1, data2, col1=cat1, col2=cat2, ax=ax, sig_level=sig_level)
+            else:
+                ax.set_visible(False)
+
+    fig.tight_layout()
+    # label rows
+    for y, cat in enumerate(categories):
+        pos = axs[y, 0].get_position()
+        x0, y0, x1, y1 = [getattr(pos, i) for i in "x0, y0, x1, y1".split(", ")]
+        fig.text(-0.01, (y0 + y1) / 2, cat, va="center", fontsize=12, rotation="vertical")
+    # label cols
+    for x, cat in enumerate(categories):
+        pos = axs[0, x].get_position()
+        x0, y0, x1, y1 = [getattr(pos, i) for i in "x0, y0, x1, y1".split(", ")]
+        fig.text(
+            (x0 + x1) / 2,
+            -0.01,
+            cat,
+            ha="center",
+            fontsize=12,
+        )
+    fig.tight_layout()
+    fig.show()
+    return fig
+
+
+# see if there any difference in moderation categories: which are most/least increased
 
 # see if there any difference in seperator tokens: which work best/worst
+h = os.popen("git rev-parse --short HEAD").read().strip()
+for c in categories[-1:]:
+    c = f"new_{c}"
+    fig = plot_comparisons(results_df, "mod_how_str", c)
+    fig.suptitle(
+        f"Compare different preprocessing steps on {c.replace('new_', '')} numeric scores",
+        fontsize=30,
+    )
+    fig.savefig(
+        f"plots/compare_sep_tokens_on_{c.replace('/', '')}_{h}.png",
+        facecolor="w",
+        bbox_inches="tight",
+    )
+
+# see if there any difference in length of input prompt
+
+# see if there any difference in source models
+
+# %%
+
+# is there an interaction?
+
+# read the prompts to see where did/didn't respond
 
 # %%
 # SCRAPE

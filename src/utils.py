@@ -126,6 +126,7 @@ def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding):
     """
     Take as many tokens as possible from the 'end' of a chat conversation.
     Make user give first and last message, and total convo length is less than max_tokens.
+        TODO: How do convos change if user isn't the first?
     max_tokens should be slightly less than real limit
     """
     # Sending any message, regardless of length has a 3 token cost
