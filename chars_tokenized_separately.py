@@ -8,6 +8,7 @@ import seaborn as sns
 from joblib import Parallel, delayed
 from itertools import takewhile, accumulate
 import time
+import ast
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -19,7 +20,6 @@ import copy
 from src.utils import (
     between_tokens,
     get_mod,
-    get_chat_completion,
     chat_to_str,
     num_tokens_from_messages,
     num_tokens_from_string,
@@ -120,12 +120,12 @@ chat_df = chat_df.reset_index(drop=True)
 # )
 
 
+categories = list(chat_df.loc[0, "openai_moderation"][0]["categories"].keys())
+
+
 def _chat_is_flagged(openai_moderation):
     """If any message in convo is flagged"""
     return any((r["flagged"] for r in openai_moderation))
-
-
-categories = list(chat_df.loc[0, "openai_moderation"][0]["categories"].keys())
 
 
 def _chat_max_by_cat(openai_moderation):
@@ -359,7 +359,7 @@ ORD_USE_BETWEEN = [
 
 
 # %%
-def get_chat_completion(model, s, sep, client=client, **kwargs):
+def get_chat_completion(model, s, sep=None, client=client, **kwargs):
     if isinstance(s, str):
         messages = [
             {
@@ -384,7 +384,9 @@ def get_chat_completion(model, s, sep, client=client, **kwargs):
                 return None, None
             time.sleep(1.5**i)
         else:
-            out = response.choices[0].message.content.replace(sep, "")
+            out = response.choices[0].message.content
+            if sep is not None:
+                out = out.replace(sep, "")
             for i in range(4):
                 try:
                     mod = client.moderations.create(input=out, model="text-moderation-stable")
@@ -397,15 +399,19 @@ def get_chat_completion(model, s, sep, client=client, **kwargs):
 
 with ThreadPoolExecutor(max_workers=10) as executor:
     new_dfs = []
-    for ord_val in ORD_USE_BETWEEN:
-        sep = chr(ord_val)
-
+    for ord_val in ORD_USE_BETWEEN + [None]:
         _r_df = pd.DataFrame(index=final_chat_df.index)
-        # Apply transformations and store results in the new DataFrame
-        _r_df["sent_convo"] = final_chat_df["conversation"].apply(
-            lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
-        )
-        _r_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(_r_df["sent_convo"])
+        if ord_val is None:
+            _r_df["sent_convo"] = final_chat_df["conversation"]
+            _r_df["manipulation"] = [{"kind": None, "sep": None}] * len(_r_df["sent_convo"])
+            sep = None
+        else:
+            sep = chr(ord_val)
+            # Apply transformations and store results in the new DataFrame
+            _r_df["sent_convo"] = final_chat_df["conversation"].apply(
+                lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
+            )
+            _r_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(_r_df["sent_convo"])
         _r_df["new_model"] = "gpt-4-0613"
         completion, oai_mod = list(
             zip(
@@ -421,13 +427,41 @@ with ThreadPoolExecutor(max_workers=10) as executor:
         new_dfs += [_r_df]
     results_df = pd.concat(new_dfs)
 
-results_df.to_csv("data_dump/results_01_18.csv")
+results_df.to_csv("data_dump/results_01_21.csv")
 _results_df = copy.deepcopy(results_df)
 # %%
+results_df = pd.read_csv(
+    "data_dump/results_01_21.csv",
+    index_col=0,
+)
+print(sum(results_df["new_oai_mod"].isna()))
+for c in results_df.columns:
+    try:
+        results_df[c] = results_df[c].apply(ast.literal_eval)
+    except Exception as e:
+        print(e)
+
+print(sum(results_df["new_oai_mod"].isna()))
+
+ord_val = None
+_r_df = pd.DataFrame(index=final_chat_df.index)
+if ord_val is None:
+    _r_df["sent_convo"] = final_chat_df["conversation"]
+    _r_df["manipulation"] = [{"kind": None, "sep": None}] * len(_r_df["sent_convo"])
+    _r_df["new_model"] = "gpt-4-0613"
+    _r_df["new_completion"] = pd.NA
+    _r_df["new_oai_mod"] = pd.NA
+results_df = pd.concat([results_df, _r_df])
+print(sum(results_df["new_oai_mod"].isna()), len(results_df))
+# %%
+_results_df = copy.deepcopy(results_df)
 # Cleanup, shouldn't need to run normally
 with ThreadPoolExecutor(max_workers=10) as executor:
-    missing_ix = results_df["new_completion"].isna()
+    missing_ix = results_df[
+        "new_oai_mod"
+    ].isna()  # & ([False] * (len(results_df) - 5) + [True] * 5)
     while sum(missing_ix):
+        print(f"adding {sum(missing_ix)}")
         results_df["sent_convo"][missing_ix] = results_df["sent_convo"][missing_ix].apply(
             lambda convo: convo
             if num_tokens_from_messages(convo) <= 8192 - 500
@@ -444,18 +478,16 @@ with ThreadPoolExecutor(max_workers=10) as executor:
                 )
             )
         )
-        print("num new: ", sum([i is not None for i in m_completion]))
-        # don't actually want this
-        m_oai_mod = [m if isinstance(m, list) else [m] for m in m_oai_mod]
+        print("num new: ", sum([i is not None for i in m_oai_mod]))
         results_df.loc[missing_ix, "new_completion"] = m_completion
         results_df.loc[missing_ix, "new_oai_mod"] = m_oai_mod
-        missing_ix = results_df["new_completion"].isna()
-        results_df.to_csv(f"data_dump/results_01_18_good{missing_ix.sum()}.csv")
+        missing_ix = results_df["new_oai_mod"].isna()
+        # results_df.to_csv(f"data_dump/results_01_18_good{missing_ix.sum()}.csv")
 
     results_df["new_oai_mod"] = results_df["new_oai_mod"].apply(
-        lambda o: o if isinstance(o, list) or o is None else [o]
+        lambda o: o if isinstance(o, list) or o is None or o is np.nan else [o]
     )
-    results_df.to_csv(f"data_dump/results_01_21.csv")
+    results_df.to_csv(f"data_dump/results_01_23.csv")
 
     # where different
     print(results_df.compare(_results_df))
@@ -474,7 +506,7 @@ with ThreadPoolExecutor(max_workers=10) as executor:
     )
 
 # %% # analysis pre-processing
-results_df = copy.deepcopy(results_df2)
+# results_df = copy.deepcopy(results_df2)
 
 results_df["new_any_flagged"] = results_df["new_oai_mod"].apply(_chat_is_flagged)
 print(
@@ -491,8 +523,9 @@ results_df = pd.concat([results_df, exploded_mod.set_index(exploded_mod.index)],
 results_df = results_df.join(final_chat_df, how="left")
 results_df["_one"] = 1
 results_df["mod_how_str"] = results_df["manipulation"].apply(
-    lambda d: f"{ord(d['sep'])}_{d['kind']}"
+    lambda d: f"{ord(d['sep'])}_{d['kind']}" if d["sep"] is not None else "none"
 )
+results_df.to_csv("data_dump/analysis_df_01_23.csv")
 # %%
 # function that takes data and plots histograms with ks divergence stat listed on them
 import pandas as pd
@@ -540,12 +573,14 @@ def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
         color=str_to_color(col1),
         alpha=0.5,
         label=col1 + f" m: {data1.mean():.2f} sd: {data1.std():.2f}",
+        density=True,
     )
     ax.hist(
         data2,
         color=str_to_color(col2),
         alpha=0.5,
         label=col2 + f" m: {data2.mean():.2f} sd: {data2.std():.2f}",
+        density=True,
     )
     statistic, p_value = ks_2samp(data1.dropna(), data2.dropna(), alternative="two-sided")
     title = f"{col1} vs {col2}"
@@ -617,12 +652,50 @@ def create_combined_plot(datas):
     for idx, (data1, data2) in enumerate(datas):
         ax = axs[idx]
         _ks_hist_plot(data1, data2, ax=ax)
+    fig.tight_layout()
     return fig
 
 
-# see if there any difference in moderation categories: which are most/least increased
-fig = create_combined_plot([(results_df[c], results_df[f"new_{c}"]) for c in categories])
-fig.suptitle("Original completion vs GPT4 modified completions")
+def some_vs_no_manipulation_by_mod_category(results_df):
+    """
+    see if there any difference in moderation categories: which are most/least increased
+    when compare any manipulation vs no manipulation
+    """
+    unchanged = results_df["manipulation"].apply(lambda d: d["sep"] is None)
+    datas = []
+    for c in categories:
+        d1 = results_df[f"new_{c}"][unchanged]
+        d1.name = f"{c} default response"
+        d2 = results_df[f"new_{c}"][~unchanged]
+        d2.name = f"{c} with seperators"
+        datas += [(d1, d2)]
+    fig = create_combined_plot(datas)
+    fig.suptitle("Original completion vs GPT4 modified completions")
+    fig.tight_layout()
+    fig.show()
+    return fig
+
+
+def some_vs_no_manipulation_by_mod_category_where_og_flagged(results_df):
+    """
+    see if there any difference in moderation categories: which are most/least increased
+    when compare any manipulation vs no manipulation
+    """
+    datas = []
+    for c in categories:
+        unchanged = results_df["manipulation"].apply(lambda d: d["sep"] is None)
+        d1 = results_df[f"new_{c}"][unchanged]
+        d1.name = f"{c} default response"
+        d2 = results_df[f"new_{c}"][~unchanged]
+        d2.name = f"{c} with seperators"
+        datas += [(d1, d2)]
+    fig = create_combined_plot(datas)
+    fig.suptitle("Original completion vs modified completions where convo originaly flagged")
+    fig.tight_layout()
+    fig.show()
+    return fig
+
+
 # %%
 # see if there any difference in seperator tokens: which work best/worst for which categories
 h = os.popen("git rev-parse --short HEAD").read().strip()
