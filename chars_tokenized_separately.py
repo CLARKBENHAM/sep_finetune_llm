@@ -569,6 +569,7 @@ for c in categories:
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import scipy.stats as stats
 from scipy.stats import ks_2samp
 import hashlib
 from itertools import combinations
@@ -706,20 +707,22 @@ def create_combined_plot(datas):
 
 
 def max_mod_scores_by_manipulation(results_df):
-    new_max_cat_scores = results_df["new_oai_mod"].apply(
+    new_max_scores = results_df["new_oai_mod"].apply(
         lambda l: max(l[0]["category_scores"].values())
+        # lambda l: int(max(l[0]["categories"].values()))
     )
-    cont_max_cat_scores = results_df["cont_oai_mod"].apply(
+    cont_max_scores = results_df["cont_oai_mod"].apply(
         lambda l: max(l[0]["category_scores"].values())
+        # lambda l: int(max(l[0]["categories"].values()))
     )
-    cont_max_cat_scores = cont_max_cat_scores.groupby(cont_max_cat_scores.index).first()
-    cont_max_cat_scores.name = "Max Mod score no manipulation"
+    cont_max_scores = cont_max_scores.groupby(cont_max_scores.index).first()
+    cont_max_scores.name = "Max Mod score no manipulation"
     datas = []
     for d in results_df["mod_how_str"].unique():
         ix = results_df["mod_how_str"] == d
-        d1 = new_max_cat_scores[ix]
+        d1 = new_max_scores[ix]
         d1.name = f"Max Mod score with {d}"
-        datas += [(d1, cont_max_cat_scores)]
+        datas += [(d1, cont_max_scores)]
     create_combined_plot(datas)
 
 
@@ -791,13 +794,62 @@ def some_vs_no_manipulation_by_mod_category_where_og_flagged(results_df, flagged
 # )
 
 
-# see if there any difference in length of input prompt
+def reg_plot(
+    x1,
+    y1,
+    xlabel,
+    ylabel,
+    title=None,
+):
+    if title is None:
+        title = f"{ylabel} vs {xlabel}"
 
-# see if there any difference in source models
+    sns.regplot(x=x1, y=y1, scatter=True, ci=95, line_kws={"color": "red"}, scatter_kws={"s": 2})
+    plt.title(title)
+    plt.ylabel(ylabel)
+    plt.xlabel(xlabel)
+    corr, p = stats.pearsonr(x1, y1)
+    plt.text(
+        0.05,
+        0.95,
+        f"corr: {corr:.2f} p: {p:.2f}",
+        horizontalalignment="left",
+        verticalalignment="top",
+        transform=plt.gca().transAxes,
+    )
+    plt.show()
 
+
+def prompt_lengths_vs_max_score(results_df):
+    """
+    plot both prompt length and output length vs max mod score
+    """
+    out_lens = results_df["new_completion"].apply(
+        lambda i: num_tokens_from_string(i) if isinstance(i, str) else 0
+    )
+    prompt_lens = results_df["sent_convo"].apply(num_tokens_from_messages)
+    new_max_scores = results_df["new_oai_mod"].apply(
+        lambda l: max(l[0]["category_scores"].values())
+    )
+    reg_plot(out_lens, new_max_scores, "output num tokens", "max mod score")
+    reg_plot(prompt_lens, new_max_scores, "prompt num tokens", "max mod score")
+
+    # Average mod by input bucket
+    buckets = pd.cut(prompt_lens, bins=10)
+    bucket_means = (
+        pd.DataFrame({"prompt_lens": prompt_lens, "Y": new_max_scores}).groupby(buckets)["Y"].mean()
+    )
+    plt.bar(range(len(bucket_means)), bucket_means)
+    plt.xticks(range(len(bucket_means)), [f"{interval.mid:.0f}" for interval in bucket_means.index])
+    plt.xlabel("Prompt Lengths")
+    plt.ylabel("Average Max Score")
+    plt.show()
+
+
+# obvious relationship with output length
+# slight relationship with input length, max scores in 2700-5700 range
+# #prompt_lengths_vs_max_score(results_df)
 # %%
-
-# is there an interaction?
 
 # read the prompts to see where did/didn't respond
 
