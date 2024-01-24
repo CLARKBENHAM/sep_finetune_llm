@@ -33,6 +33,11 @@ MN_TOKENS = 50
 # HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
 HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
 
+
+def git_hash():
+    return os.popen("git rev-parse --short HEAD").read().strip()
+
+
 # Download first 2 train splits from:
 # https://huggingface.co/datasets/lmsys/lmsys-chat-1m/tree/main/data
 # https://huggingface.co/datasets/kjj0/4chanpol-openaimod/tree/main/data
@@ -291,12 +296,12 @@ assert final_chat_df["conversation_id"].nunique() == len(final_chat_df)
 
 print(
     "all categories\n",
-    final_chat_df[categories][final_chat_df[categories] > 0.3].count(),
-    chat_df[categories][chat_df[categories] > 0.3].count(),
+    (final_chat_df[categories] > 0.3).sum(),
+    (chat_df[categories] > 0.3).sum(),
 )
 print(
     "fraction of rows with: ",
-    final_chat_df[test_columns][final_chat_df[test_columns] > 0.3].count() / len(final_chat_df),
+    (final_chat_df[test_columns] > 0.3).sum() / len(final_chat_df),
 )
 
 print(
@@ -427,11 +432,11 @@ with ThreadPoolExecutor(max_workers=10) as executor:
         new_dfs += [_r_df]
     results_df = pd.concat(new_dfs)
 
-results_df.to_csv("data_dump/results_01_21.csv")
+results_df.to_csv(f"data_dump/results_01_21_{git_hash()}.csv")
 _results_df = copy.deepcopy(results_df)
-# %%
+# %% Recover and add more entries
 results_df = pd.read_csv(
-    "data_dump/results_01_21.csv",
+    "data_dump/results_01_23.csv",
     index_col=0,
 )
 print(sum(results_df["new_oai_mod"].isna()))
@@ -442,7 +447,7 @@ for c in results_df.columns:
         print(e)
 
 print(sum(results_df["new_oai_mod"].isna()))
-
+# %%
 ord_val = None
 _r_df = pd.DataFrame(index=final_chat_df.index)
 if ord_val is None:
@@ -508,24 +513,57 @@ with ThreadPoolExecutor(max_workers=10) as executor:
 # %% # analysis pre-processing
 # results_df = copy.deepcopy(results_df2)
 
-results_df["new_any_flagged"] = results_df["new_oai_mod"].apply(_chat_is_flagged)
+some_mod = results_df["manipulation"].apply(lambda d: d["sep"] is not None or d["kind"] is not None)
+exploded_mod = pd.DataFrame(
+    results_df["new_oai_mod"][some_mod]
+    .apply(lambda l: {f"new_{k}": v for k, v in _chat_max_by_cat(l).items()})
+    .apply(pd.Series)
+)
+exploded_mod["new_any_flagged"] = results_df["new_oai_mod"][some_mod].apply(_chat_is_flagged)
+
+exploded_default_mod = pd.DataFrame(
+    results_df["new_oai_mod"][~some_mod]
+    .apply(lambda l: {f"cont_{k}": v for k, v in _chat_max_by_cat(l).items()})
+    .apply(pd.Series)
+)
+exploded_default_mod["cont_completion"] = results_df["new_completion"][~some_mod]
+exploded_default_mod["cont_oai_mod"] = results_df["new_oai_mod"][~some_mod]
+exploded_mod["cont_any_flagged"] = results_df["new_oai_mod"][~some_mod].apply(_chat_is_flagged)
+
+results_df = pd.concat(
+    [
+        results_df[some_mod],
+        exploded_mod.set_index(exploded_mod.index),
+    ],
+    axis=1,
+)
+
+results_df = results_df.join([final_chat_df, exploded_default_mod], how="left")
+results_df["_one"] = 1
+results_df["mod_how_str"] = results_df["manipulation"].apply(
+    lambda d: f"{ord(d['sep'])}_{d['kind']}"
+)
+results_df.to_csv(f"data_dump/analysis_df_01_23_{git_hash()}.csv")
+
+# %%
+# scrape analysis
 print(
     f"% flagged: {results_df['new_any_flagged'].mean()*100:.1f}%,"
     f" {results_df['new_any_flagged'].sum()}"
 )
-exploded_mod = pd.DataFrame(
-    results_df["new_oai_mod"]
-    .apply(lambda l: {f"new_{k}": v for k, v in _chat_max_by_cat(l).items()})
-    .apply(pd.Series)
-)
-results_df = pd.concat([results_df, exploded_mod.set_index(exploded_mod.index)], axis=1)
+mod_df = final_chat_df["openai_moderation"]
+mod_df = results_df["new_oai_mod"]
+cutoff = 0.7
+for c in categories:
+    c_flagged = mod_df.apply(lambda l: l[0]["categories"][c])
+    c_flagged.name = "is_flagged"
+    c_scores = mod_df.apply(lambda l: l[0]["category_scores"][c])
+    c_scores = c_scores > cutoff
+    c_scores.name = f"score above {cutoff}"
+    ct = pd.crosstab(c_flagged, c_scores)
+    print(c, ct, "\n\n")
+    # print(f"{c} {sum(c_flagged)} vs {d[c]} where is flagged: {c_scores[c_flagged].mean():.2f} isn't: {c_scores[~c_flagged].mean():.2f}")
 
-results_df = results_df.join(final_chat_df, how="left")
-results_df["_one"] = 1
-results_df["mod_how_str"] = results_df["manipulation"].apply(
-    lambda d: f"{ord(d['sep'])}_{d['kind']}" if d["sep"] is not None else "none"
-)
-results_df.to_csv("data_dump/analysis_df_01_23.csv")
 # %%
 # function that takes data and plots histograms with ks divergence stat listed on them
 import pandas as pd
@@ -573,14 +611,14 @@ def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
         color=str_to_color(col1),
         alpha=0.5,
         label=col1 + f" m: {data1.mean():.2f} sd: {data1.std():.2f}",
-        density=True,
+        # density=True,
     )
     ax.hist(
         data2,
         color=str_to_color(col2),
         alpha=0.5,
         label=col2 + f" m: {data2.mean():.2f} sd: {data2.std():.2f}",
-        density=True,
+        # density=True,
     )
     statistic, p_value = ks_2samp(data1.dropna(), data2.dropna(), alternative="two-sided")
     title = f"{col1} vs {col2}"
@@ -591,12 +629,9 @@ def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
     # return ax
 
 
-# %%
-
-
 def plot_comparisons(df, cat_col, score_col, comparison_type="categorical", sig_level=0.01):
     """
-    Generate comparisons for different categories or scores.
+    Generate comparisons for different categories or scores as lower triangle
 
     :param df: Pandas DataFrame with the data.
     :param columns: List of columns for comparisons.
@@ -646,6 +681,20 @@ def plot_comparisons(df, cat_col, score_col, comparison_type="categorical", sig_
     return fig
 
 
+# # No difference in which seperator tokens which work best/worst for which categories
+# for c in categories:
+#     fig = plot_comparisons(results_df, "mod_how_str", f"new_{c}")
+#     fig.suptitle(
+#         f"Compare different preprocessing steps on {c} numeric scores",
+#         fontsize=50,
+#     )
+#     fig.savefig(
+#         f"plots/compare_sep_tokens_on_{c.replace('/', '')}_{git_hash()}.png",
+#         facecolor="w",
+#         bbox_inches="tight",
+#     )
+
+
 def create_combined_plot(datas):
     fig, axs = plt.subplots(len(datas), 1, figsize=(10, 5 * len(datas)))
     # Iterate over data pairs and create subplots
@@ -656,61 +705,91 @@ def create_combined_plot(datas):
     return fig
 
 
+def max_mod_scores_by_manipulation(results_df):
+    new_max_cat_scores = results_df["new_oai_mod"].apply(
+        lambda l: max(l[0]["category_scores"].values())
+    )
+    cont_max_cat_scores = results_df["cont_oai_mod"].apply(
+        lambda l: max(l[0]["category_scores"].values())
+    )
+    cont_max_cat_scores = cont_max_cat_scores.groupby(cont_max_cat_scores.index).first()
+    cont_max_cat_scores.name = "Max Mod score no manipulation"
+    datas = []
+    for d in results_df["mod_how_str"].unique():
+        ix = results_df["mod_how_str"] == d
+        d1 = new_max_cat_scores[ix]
+        d1.name = f"Max Mod score with {d}"
+        datas += [(d1, cont_max_cat_scores)]
+    create_combined_plot(datas)
+
+
+# For no manipulation are max mod scores diff from default
+# max_mod_scores_by_manipulation(results_df)
+
+
 def some_vs_no_manipulation_by_mod_category(results_df):
     """
     see if there any difference in moderation categories: which are most/least increased
     when compare any manipulation vs no manipulation
     """
-    unchanged = results_df["manipulation"].apply(lambda d: d["sep"] is None)
     datas = []
     for c in categories:
-        d1 = results_df[f"new_{c}"][unchanged]
+        d1 = results_df[f"cont_{c}"]
+        # so arent sampling the same data aross multiple rows
+        d1 = d1.groupby(d1.index).first()
         d1.name = f"{c} default response"
-        d2 = results_df[f"new_{c}"][~unchanged]
+        d2 = results_df[f"new_{c}"]
         d2.name = f"{c} with seperators"
-        datas += [(d1, d2)]
+        if len(d1) > 0 and len(d2) > 0:
+            datas += [(d1, d2)]
     fig = create_combined_plot(datas)
     fig.suptitle("Original completion vs GPT4 modified completions")
     fig.tight_layout()
-    fig.show()
     return fig
 
 
-def some_vs_no_manipulation_by_mod_category_where_og_flagged(results_df):
+# basically no difference in average mod scores by category
+# some_vs_no_manipulation_by_mod_category(results_df)
+
+
+def some_vs_no_manipulation_by_mod_category_where_og_flagged(results_df, flagged_by):
     """
+    flagged_by: a lambda taking in an openai moderation object and category and returns boolean
+    in convos that were initally flagged for the category
     see if there any difference in moderation categories: which are most/least increased
     when compare any manipulation vs no manipulation
     """
     datas = []
     for c in categories:
-        unchanged = results_df["manipulation"].apply(lambda d: d["sep"] is None)
-        d1 = results_df[f"new_{c}"][unchanged]
+        c_flagged = results_df["openai_moderation"].apply(lambda l: flagged_by(l[0], c))
+        d1 = results_df[f"cont_{c}"][c_flagged]
+        # so arent sampling the same data aross multiple rows
+        d1 = d1.groupby(d1.index).first()
         d1.name = f"{c} default response"
-        d2 = results_df[f"new_{c}"][~unchanged]
+        d2 = results_df[f"new_{c}"][c_flagged]
         d2.name = f"{c} with seperators"
-        datas += [(d1, d2)]
+        if len(d1) > 0 and len(d2) > 0:
+            datas += [(d1, d2)]
     fig = create_combined_plot(datas)
-    fig.suptitle("Original completion vs modified completions where convo originaly flagged")
+    fig.suptitle("Original completion vs GPT4 modified completions where flagged")
     fig.tight_layout()
-    fig.show()
     return fig
 
 
-# %%
-# see if there any difference in seperator tokens: which work best/worst for which categories
-h = os.popen("git rev-parse --short HEAD").read().strip()
-for c in categories:
-    c = f"new_{c}"
-    fig = plot_comparisons(results_df, "mod_how_str", c)
-    fig.suptitle(
-        f"Compare different preprocessing steps on {c.replace('new_', '')} numeric scores",
-        fontsize=50,
-    )
-    fig.savefig(
-        f"plots/compare_sep_tokens_on_{c.replace('/', '')}_{h}.png",
-        facecolor="w",
-        bbox_inches="tight",
-    )
+# # No difference restrict analysis to was flagged or not, nor does it matter what cutoff used
+# some_vs_no_manipulation_by_mod_category_where_og_flagged(
+#    results_df, lambda m, c: m["categories"][c]
+# )
+# some_vs_no_manipulation_by_mod_category_where_og_flagged(
+#    results_df, lambda m, c: m["category_scores"][c] > 0.7
+# )
+# some_vs_no_manipulation_by_mod_category_where_og_flagged(
+#    results_df, lambda m, c: m["category_scores"][c] > 0.5
+# )
+# some_vs_no_manipulation_by_mod_category_where_og_flagged(
+#    results_df, lambda m, c: m["category_scores"][c] > 0.3
+# )
+
 
 # see if there any difference in length of input prompt
 
