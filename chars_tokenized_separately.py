@@ -92,7 +92,68 @@ chat_df = pd.concat([pd.read_parquet(f) for f in files if "lmsys-chat-1m" in f],
 # )
 
 
-# %%
+# Just use pickles unless absolutely have to
+def recover_csv(
+    path,
+    arr_cols=["sent_conv", "conversation"],
+    json_cols=["openai_moderation", "new_oai_mod", "gpt40613_oai_mod", "gpt41106preview_oai_mod"],
+    **kwargs,
+):
+    df = pd.read_csv(path, **kwargs)
+    for c in df.columns:
+        try:
+            df[c] = df[c].apply(ast.literal_eval)
+            print(c, sum(df[c].isna()))
+        except Exception as e:
+            print(e)
+    print(df.shape)
+    for c in arr_cols:
+        if c in df:
+            df[c] = df[c].map(
+                lambda x: np.array(
+                    [
+                        {
+                            **d,
+                            "content": d["content"]
+                            .encode("utf-16", "surrogatepass")
+                            .decode("utf-16"),
+                        }
+                        for d in x
+                    ]
+                )
+            )
+    for c in json_cols:
+        df[c] = df[c].apply(json.loads)
+    return df
+
+
+def _assert_recovery(
+    df,
+    exp_df,
+    arr_cols=["sent_conv", "conversation"],
+    json_cols=["openai_moderation", "new_oai_mod", "gpt40613_oai_mod", "gpt41106preview_oai_mod"],
+):
+    for c in json_cols:
+        assert exp_df[c].apply(tuple).equals(exp_df[c].apply(tuple))
+    for c in arr_cols:
+        assert exp_df[c].apply(str).equals(exp_df[c].apply(str))
+    cs = [c for c in exp_df.columns if c not in arr_cols + json_cols]
+    assert exp_df[cs].equals(exp_df[cs])
+
+
+# WARN: final_chat_df might not be creatable by code used below
+# final_chat_df=recover_csv("data_dump/preprocessing_chat_df_250_34d63d4.csv")
+# result_df = recover_csv("data_dump/results_01_24_beb23c3.csv")
+# analysis_df = recover_csv("data_dump/analysis_df_01_24_beb23c3.csv")
+
+# final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_250_34d63d4.pkl")
+# results_df2 = pd.read_pickle("data_dump/results2_01_25_34d63d4.pkl")
+# analyssi_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
+
+
+# _assert_recovery(exp_final_chat_df, final_chat_df)
+# _assert_recovery(exp_final_chat_df2, final_chat_df2)
+# %% Pre-process data
 def prefilter_chats(m, mn_tokens=MN_TOKENS, mx_tokens=np.inf):
     """
     enforce min length, excluding last assistant response
@@ -241,53 +302,9 @@ def choose_columns(X, y, n_ret_cols, make_plots=False, min_pca_explained=0.90, n
     )
 
 
-# %% Select test data
-N_PER_CATEGORY = 50
-test_columns = ["sexual", "harassment", "violence", "sexual/minors", "self-harm/instructions"]
-
-
-def select_rows(chat_df, n_per_cat=N_PER_CATEGORY, test_columns=None):
-    if test_columns is None:
-        X = chat_df[categories]
-        y = chat_df["any_flagged"]
-        test_columns = choose_columns(
-            X, y, n_ret_cols=5, make_plots=False, min_pca_explained=0.9, n_pca_components=6
-        )
-        X = X[test_columns]
-        print(pd.concat([X, y], axis=1).corr())
-
-    # sort categories with fewest first
-    test_columns = list(
-        chat_df[test_columns][chat_df[test_columns] > 0.3]
-        .count()
-        .sort_values(ascending=True)
-        .keys()
-    )
-
-    top_per_category = []
-    included_conversations = set()
-    unused_chats = chat_df.copy()
-    # [chat_df["conversation"].apply(_filter_prompts)].copy()  # Slow
-
-    for category in test_columns:
-        unique_sorted_df = unused_chats.sort_values(by=[category], ascending=False).head(n_per_cat)
-        top_per_category.append(unique_sorted_df)
-        included_conversations.update(unique_sorted_df["conversation_id"])
-        unused_chats = unused_chats[~unused_chats["conversation_id"].isin(included_conversations)]
-
-    # Combine all the DataFrames
-    final_chat_df = pd.concat(top_per_category, ignore_index=True)
-    _s = sum(final_chat_df["openai_moderation"].apply(_chat_is_flagged))
-    if _s != len(test_columns) * N_PER_CATEGORY:
-        print(f"WARN: Not all Chats flagged: only {_s}/{len(test_columns) * N_PER_CATEGORY}")
-    assert final_chat_df["conversation_id"].nunique() == len(final_chat_df)
-    return final_chat_df
-
-
 chat_df = chat_df[parallel_apply(chat_df["conversation"], prefilter_chats, n_jobs=8)]
 chat_df = chat_df.reset_index(drop=True)
-
-# explode columns
+# explode columns for filtering
 chat_df = chat_df.join(pd.DataFrame(chat_df["openai_moderation"].apply(_chat_max_by_cat).tolist()))
 chat_df["any_flagged"] = chat_df["openai_moderation"].apply(_chat_is_flagged)
 
@@ -301,7 +318,10 @@ chat_df2 = copy.deepcopy(
     ]
 )
 chat_df2 = chat_df2[~chat_df2["conversation_id"].isin(analysis_df["conversation_id"])]
-# %%
+# chat_df3 is a different preprocessing of chat_df2
+chat_df3 = copy.deepcopy(chat_df2)
+
+# %% Select Rows
 # # summary stats
 # print(f"% flagged: {chat_df['any_flagged'].mean()*100:.1f}%, {chat_df['any_flagged'].sum()}")
 # cat_flagged = pd.DataFrame(chat_df["openai_moderation"].apply(_chat_flagged_by_cat).values.tolist())
@@ -318,28 +338,95 @@ chat_df2 = chat_df2[~chat_df2["conversation_id"].isin(analysis_df["conversation_
 #    f"{d.mean()*100:.1f}%",
 # )
 
+N_PER_CATEGORY = 50
+test_columns = ["sexual", "harassment", "violence", "sexual/minors", "self-harm/instructions"]
 
+
+def select_rows(chat_df, n_per_cat, test_columns, _first_chat_df_hack=False):
+    """
+    _first_chat_df_hack: HACK! True to handle the old way of doing things
+        (Originally sorted categories by most >0.3 in full data, now it's and after filtering)
+    """
+    if test_columns is None:
+        X = chat_df[categories]
+        y = chat_df["any_flagged"]
+        test_columns = choose_columns(
+            X, y, n_ret_cols=5, make_plots=False, min_pca_explained=0.9, n_pca_components=6
+        )
+        X = X[test_columns]
+        print(pd.concat([X, y], axis=1).corr())
+
+    # sort categories with fewest first
+    test_columns = list(
+        chat_df[test_columns][chat_df[test_columns] > 0.3]
+        .count()
+        .sort_values(ascending=True)
+        .keys()
+    )
+    if _first_chat_df_hack:
+        test_columns = [
+            "sexual",
+            "violence",
+            "harassment",
+            "sexual/minors",
+            "self-harm/instructions",
+        ]
+
+    top_per_category = []
+    included_conversations = set()
+    unused_chats = chat_df.copy()
+    # [chat_df["conversation"].apply(_filter_prompts)].copy()  # Slow
+
+    for category in test_columns:
+        unique_sorted_df = unused_chats.sort_values(by=[category], ascending=False).head(n_per_cat)
+        top_per_category.append(unique_sorted_df)
+        included_conversations.update(unique_sorted_df["conversation_id"])
+        unused_chats = unused_chats[~unused_chats["conversation_id"].isin(included_conversations)]
+
+    # Combine all the DataFrames
+    final_chat_df = pd.concat(top_per_category, ignore_index=True)
+    _s = sum(final_chat_df["openai_moderation"].apply(_chat_is_flagged))
+    if _s != len(test_columns) * n_per_cat:
+        print(f"WARN: Not all Chats flagged: only {_s}/{len(test_columns) * n_per_cat}")
+    assert final_chat_df["conversation_id"].nunique() == len(final_chat_df)
+    return final_chat_df
+
+
+def make_user_last_speaker(convo):
+    for ix in range(len(convo) - 1, -1, -1):
+        if convo[ix]["role"] == "user":
+            return convo[: ix + 1]
+    assert False, "No user in convo"
+
+
+# Still slighty different from original since didn't cut number of convos yet
 final_chat_df = select_rows(
-    chat_df,
-    test_columns=test_columns,
+    chat_df, n_per_cat=N_PER_CATEGORY, test_columns=test_columns, _first_chat_df_hack=True
 )
+
 final_chat_df2 = select_rows(
     chat_df2,
+    n_per_cat=N_PER_CATEGORY,
+    test_columns=test_columns,
+)
+final_chat_df3 = select_rows(
+    chat_df3,
+    n_per_cat=N_PER_CATEGORY,
     test_columns=test_columns,
 )
 
-print(
-    "before filtering length",
-    final_chat_df["conversation"]
-    .apply(num_tokens_from_messages)
-    .agg(["min", "max", "std", "mean"]),
-)
-
-# Since will double tokens with sep, and need 500 to max out each completion
-# (don't think this ever ran the first time?)
+for df in (final_chat_df, final_chat_df2, final_chat_df3):
+    print(
+        "before reducing convo length",
+        df["conversation"].apply(num_tokens_from_messages).agg(["min", "max", "std", "mean"]),
+    )
 final_chat_df["conversation"] = final_chat_df["conversation"].apply(
-    lambda c: end_of_convo(c, max_tokens=8096 // 2 - 500)
+    lambda c: end_of_convo(c, max_tokens=8196 // 2 - 500 - 50)
 )
+c = [c for c in chat_df3.columns if c != "conversation"]
+assert final_chat_df2[c].equals(final_chat_df3[c])
+
+final_chat_df3["conversation"] = final_chat_df3["conversation"].apply(make_user_last_speaker)
 
 
 def final_chat_df_summaries(final_chat_df, chat_df):
@@ -351,13 +438,13 @@ def final_chat_df_summaries(final_chat_df, chat_df):
     )
 
     print(
-        "\nall categories\n",
+        "\nall categories selected vs posible\n",
         (final_chat_df[categories] > 0.3).sum(),
         (chat_df[categories] > 0.3).sum(),
     )
     print(
         "\nfraction of rows with: ",
-        (final_chat_df[test_columns] > 0.3).sum() / len(final_chat_df),
+        (final_chat_df[test_columns] > 0.3).mean(),
     )
 
     _, (ax1, ax2, ax3) = plt.subplots(3)
@@ -373,32 +460,17 @@ def final_chat_df_summaries(final_chat_df, chat_df):
 
 
 final_chat_df_summaries(final_chat_df, chat_df)
-##%%
-# _final_chat_df2 = copy.deepcopy(final_chat_df2)
-# _chat_df2 = copy.deepcopy(chat_df2)
-# chat_df2 = copy.deepcopy(
-#    chat_df[
-#        parallel_apply(
-#            chat_df["conversation"],
-#            lambda m: prefilter_chats(m, mn_tokens=750, mx_tokens=2500),
-#            n_jobs=8,
-#        )
-#    ]
-# )
-# chat_df2 = chat_df2[~chat_df2["conversation_id"].isin(analysis_df["conversation_id"])]
-# final_chat_df2 = select_rows(
-#    chat_df2,
-#    test_columns=test_columns,
-# )
-# final_chat_df_summaries(_final_chat_df2, _chat_df2)
-# final_chat_df_summaries(final_chat_df2, chat_df2)
-# %%
-json_cols = ["conversation", "openai_moderation"]
-for c in json_cols:
-    final_chat_df[c] = final_chat_df[c].apply(lambda l: json.dumps(list(l)))
-final_chat_df.to_csv(f"data_dump/preprocessing_chat_df_250_{git_hash()}.csv", index=False)
+final_chat_df_summaries(final_chat_df2, chat_df2)
+final_chat_df_summaries(final_chat_df3, chat_df3)
 
-final_chat_df2.to_pickle(f"data_dump/final_chat_df2_250_{git_hash()}.pkl")
+# json_cols = ["conversation", "openai_moderation"]
+# for c in json_cols:
+#    final_chat_df[c] = final_chat_df[c].apply(lambda l: json.dumps(list(l)))
+# final_chat_df.to_csv(f"data_dump/preprocessing_chat_df_250_{git_hash()}.csv", index=False)
+
+# final_chat_df2.to_pickle(f"data_dump/final_chat_df2_250_{git_hash()}.pkl") # data_dump/final_chat_df2_250_34d63d4.pkl
+
+# final_chat_df3.to_pickle(f"data_dump/final_chat_df3_250_{git_hash()}.pkl") # data_dump/final_chat_df3_250_6290f6d.pkl
 # Finished preprocessing
 # %%
 
@@ -408,14 +480,9 @@ client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
 
-final_chat_df = pd.read_csv(
-    "data_dump/preprocessing_chat_df_250.csv",
-)
-json_cols = ["conversation", "openai_moderation"]
-for c in json_cols:
-    final_chat_df[c] = final_chat_df[c].apply(json.loads)
-
-final_chat_df2 = pd.read_pickle(f"data_dump/final_chat_df2_250_{git_hash()}.pkl")
+# final_chat_df = recover_csv("data_dump/preprocessing_chat_df_250.csv")
+# final_chat_df2 = pd.read_pickle(f"data_dump/final_chat_df2_250_{git_hash()}.pkl")
+# final_chat_df3 = pd.read_pickle(f"data_dump/final_chat_df3_250_{git_hash()}.pkl")
 
 ORD_USE_BETWEEN = [
     0,  # most unique
@@ -431,6 +498,60 @@ ORD_USE_BETWEEN = [
 
 
 # %%
+# rows to make
+def make_results_frame(final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="gpt-4-0613"):
+    if model not in ("gpt-4-1106-preview", "gpt-4-0613"):
+        print(f"WARN: model {model} not expected")
+    new_dfs = []
+    for ord_val in ord_vals:
+        _r_df = pd.DataFrame(index=final_chat_df.index)
+        _r_df["new_completion"] = pd.NA
+        _r_df["new_oai_mod"] = pd.NA
+        _r_df["new_model"] = model
+        if ord_val is None:
+            _r_df["sent_convo"] = final_chat_df["conversation"]
+            _r_df["manipulation"] = [{"kind": None, "sep": None}] * len(_r_df["sent_convo"])
+            sep = None
+        else:
+            sep = chr(ord_val)
+            # Apply transformations and store results in the new DataFrame
+            _r_df["sent_convo"] = final_chat_df["conversation"].apply(
+                lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
+            )
+            _r_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(_r_df["sent_convo"])
+        new_dfs += [_r_df]
+    return pd.concat(new_dfs)
+
+
+def _mrf(final_chat_df):
+    o = pd.concat(
+        [
+            make_results_frame(
+                final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="gpt-4-0613"
+            ),
+            make_results_frame(final_chat_df, ord_vals=[None], model="gpt-4-1106-preview"),
+        ]
+    )
+    print(sum(o["new_oai_mod"].isna()), len(o))
+    return o
+
+
+results_frame = _mrf(final_chat_df)
+print(results_frame[results_df.columns].compare(results_df))
+# %%
+# results_frame = _mrf(final_chat_df)
+# # Not quite the same for results_df since final_chat_df was later feed through end_of_convo
+# print(results_frame[results_df.columns].compare(results_df))
+results_frame2 = _mrf(final_chat_df2)
+# print(results_frame2[results_df2.columns].compare(results_df2))
+# Won't work since some convos have more turns than others
+for c in results_df2.columns[1:]:
+    print(c, results_frame2[c].compare(results_df2[c]))
+print(sum(results_df2["new_oai_mod"].isna()), len(results_df2))
+
+
+# %%
+# WARN: MAKES REQUESTS
 def get_chat_completion(model, s, sep=None, client=client, **kwargs):
     if isinstance(s, str):
         messages = [
@@ -476,151 +597,103 @@ def get_chat_completion(model, s, sep=None, client=client, **kwargs):
     return None, None
 
 
-# %%
-# with ThreadPoolExecutor(max_workers=15) as executor:
-#    new_dfs = []
-#    for ord_val in ORD_USE_BETWEEN + [None]:
-#        _r_df = pd.DataFrame(index=final_chat_df.index)
-#        if ord_val is None:
-#            _r_df["sent_convo"] = final_chat_df["conversation"]
-#            _r_df["manipulation"] = [{"kind": None, "sep": None}] * len(_r_df["sent_convo"])
-#            sep = None
-#        else:
-#            sep = chr(ord_val)
-#            # Apply transformations and store results in the new DataFrame
-#            _r_df["sent_convo"] = final_chat_df["conversation"].apply(
-#                lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
-#            )
-#            _r_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(_r_df["sent_convo"])
-#        _r_df["new_model"] = "gpt-4-0613"
-#        completion, oai_mod = list(
-#            zip(
-#                *executor.map(
-#                    lambda m: get_chat_completion("gpt-4-0613", m, sep=sep),
-#                    _r_df["sent_convo"].values,
-#                )
-#            )
-#        )
-#        _r_df["new_completion"] = completion
-#        # oai_mod is only run on completion
-#        _r_df["new_oai_mod"] = oai_mod
-#        new_dfs += [_r_df]
-#    results_df = pd.concat(new_dfs)
-#
-# results_df.to_csv(f"data_dump/results_01_25_{git_hash()}.csv")
-# _results_df = copy.deepcopy(results_df)
-
-with ThreadPoolExecutor(max_workers=10) as executor:
-    new_dfs2 = []
-    for ord_val in ORD_USE_BETWEEN + [None]:
-        _r_df = pd.DataFrame(index=final_chat_df2.index)
-        if ord_val is None:
-            _r_df["sent_convo"] = final_chat_df2["conversation"]
-            _r_df["manipulation"] = [{"kind": None, "sep": None}] * len(_r_df["sent_convo"])
-            sep = None
-        else:
-            sep = chr(ord_val)
-            # Apply transformations and store results in the new DataFrame
-            _r_df["sent_convo"] = final_chat_df2["conversation"].apply(
-                lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
-            )
-            _r_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(_r_df["sent_convo"])
-        _r_df["new_model"] = "gpt-4-0613"
-        completion, oai_mod = list(
-            zip(
-                *executor.map(
-                    lambda m: get_chat_completion("gpt-4-0613", m, sep=sep),
-                    _r_df["sent_convo"].values,
+def fill_out_results(results_df_frame, n_loops=1):
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        missing_ix = results_df_frame[
+            "new_oai_mod"
+        ].isna()  # & ([False] * (len(results_df) - 5) + [True] * 5)
+        results_df = copy.deepcopy(results_df_frame[missing_ix])
+        while sum(missing_ix) and n_loops > 0:
+            print(f"adding {sum(missing_ix)}")
+            m_completion, m_oai_mod = list(
+                zip(
+                    *executor.map(
+                        lambda mcsep: get_chat_completion(mcsep[0], mcsep[1], sep=mcsep[2]),
+                        zip(
+                            results_df["new_model"][missing_ix],
+                            results_df["sent_convo"][missing_ix],
+                            results_df["manipulation"][missing_ix].apply(lambda i: i["sep"]),
+                        ),
+                    )
                 )
             )
-        )
-        _r_df["new_completion"] = completion
-        # oai_mod is only run on completion
-        _r_df["new_oai_mod"] = oai_mod
-        new_dfs2 += [_r_df]
-    results_df2 = pd.concat(new_dfs2)
+            print("num new: ", sum([i is not None for i in m_oai_mod]))
+            results_df.loc[missing_ix, "new_completion"] = m_completion
+            m_oai_mod2 = [o[0] if isinstance(o, list) else o for o in m_oai_mod]
+            results_df.loc[missing_ix, "new_oai_mod"] = m_oai_mod2
+            missing_ix = results_df["new_oai_mod"].isna()
+            n_loops -= 1
 
-results_df2.to_csv(f"data_dump/results2_01_25_{git_hash()}.csv")
-results_df2.to_pickle(f"data_dump/results2_01_25_{git_hash()}.pkl")
-# %% Recover and add more entries
-results_df = pd.read_csv(
-    "data_dump/results_01_23.csv",
-    index_col=0,
-)
-print(sum(results_df["new_oai_mod"].isna()))
-for c in results_df.columns:
-    try:
-        results_df[c] = results_df[c].apply(ast.literal_eval)
-    except Exception as e:
-        print(e)
-
-print(sum(results_df["new_oai_mod"].isna()))
-# %% add gpt411 chance
-ord_val = None
-_r_df = pd.DataFrame(index=final_chat_df.index)
-if ord_val is None:
-    _r_df["sent_convo"] = final_chat_df["conversation"]
-    _r_df["manipulation"] = [{"kind": None, "sep": None}] * len(_r_df["sent_convo"])
-    _r_df["new_model"] = "gpt-4-1106-preview"
-    _r_df["new_completion"] = pd.NA
-    _r_df["new_oai_mod"] = pd.NA
-results_df2 = pd.concat([results_df2, _r_df])
-print(sum(results_df2["new_oai_mod"].isna()), len(results_df2))
-# %%
-_results_df2 = copy.deepcopy(results_df2)
-# Cleanup, shouldn't need to run normally
-with ThreadPoolExecutor(max_workers=15) as executor:
-    missing_ix = results_df2[
-        "new_oai_mod"
-    ].isna()  # & ([False] * (len(results_df2) - 5) + [True] * 5)
-    while sum(missing_ix):
-        print(f"adding {sum(missing_ix)}")
-        results_df2["sent_convo"][missing_ix] = results_df2["sent_convo"][missing_ix].apply(
-            lambda convo: convo
-            if num_tokens_from_messages(convo) <= 8192 - 500
-            else end_of_convo(convo, max_tokens=8192 - 500)
+        results_df["new_oai_mod"] = results_df["new_oai_mod"].apply(
+            lambda o: o if isinstance(o, list) or o is None or o is np.nan else [o]
         )
-        m_completion, m_oai_mod = list(
-            zip(
-                *executor.map(
-                    lambda msep: get_chat_completion("gpt-4-1106-preview", msep[0], sep=msep[1]),
-                    zip(
-                        results_df2["sent_convo"][missing_ix],
-                        results_df2["manipulation"][missing_ix].apply(lambda i: i["sep"]),
-                    ),
-                )
-            )
-        )
-        print("num new: ", sum([i is not None for i in m_oai_mod]))
-        results_df2.loc[missing_ix, "new_completion"] = m_completion
-        m_oai_mod2 = [o[0] if isinstance(o, list) else o for o in m_oai_mod]
-        results_df2.loc[missing_ix, "new_oai_mod"] = m_oai_mod2
-        missing_ix = results_df2["new_oai_mod"].isna()
-        # results_df2.to_csv(f"data_dump/results_01_18_good{missing_ix.sum()}.csv")
+    return results_df
 
-    results_df2["new_oai_mod"] = results_df2["new_oai_mod"].apply(
-        lambda o: o if isinstance(o, list) or o is None or o is np.nan else [o]
-    )
 
 # results_df.to_csv(f"data_dump/results_01_24_{git_hash()}.csv") # data_dump/results_01_24_beb23c3.csv # likeley
-# results_df2.to_csv(f"data_dump/results2_01_25_{git_hash()}.csv") # data_dump/results2_01_25_34d63d4.csv #definitly
 
+# WARN: 2 rows got type errors with no manipulation for both models
+# these 2 na rows in oai_mod and completion otherwise break the analysis_df
+# results_df2.to_csv(f"data_dump/results2_01_25_{git_hash()}.csv")
+# results_df2.to_pickle(f"data_dump/results2_01_25_{git_hash()}.pkl")  # data_dump/results2_01_25_34d63d4.pkl
+
+r = copy.deepcopy(results_frame2.iloc[:2])
+_r = copy.deepcopy(r)
+r = fill_out_results(r)
 # where different
-print(results_df2.compare(_results_df2))
+print(r.compare(_r))
 plt.hist(
-    results_df2.compare(_results_df2)["new_oai_mod"]["self"].apply(
+    r.compare(_r)["new_oai_mod"]["self"].apply(
         lambda openai_moderation: max(openai_moderation[0]["category_scores"].values())
     ),
-    density=True,
 )
 plt.show()
 plt.hist(
-    _results_df2[~_results_df2["new_oai_mod"].isna()]["new_oai_mod"].apply(
+    _r[~_r["new_oai_mod"].isna()]["new_oai_mod"].apply(
         lambda openai_moderation: max(openai_moderation[0]["category_scores"].values())
     ),
-    density=True,
 )
-# results should concat both results and results_df2
+
+
+# %% Recover
+# WARN: final_chat_df might not be creatable by code used below
+exp_final_chat_df = recover_csv("data_dump/preprocessing_chat_df_250_34d63d4.csv")
+exp_results_df = recover_csv("data_dump/results_01_24_beb23c3.csv")
+exp_analysis_df = recover_csv("data_dump/analysis_df_01_24_beb23c3.csv")
+
+exp_final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_250_34d63d4.pkl")
+exp_results_df2 = pd.read_pickle("data_dump/results2_01_25_34d63d4.pkl")
+exp_analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
+
+print(
+    exp_final_chat_df.equals(final_chat_df),
+    # exp_results_df.equals(results_df),
+    # exp_analysis_df.equals(analysis_df),
+    exp_final_chat_df2.equals(final_chat_df2),
+    # exp_results_df2.equals(results_df2),
+    # exp_analysis_df2.equals(analyssi_df2),
+)
+
+
+# a = recover_csv("data_dump/preprocessing_chat_df_250.csv")
+# # weirdness around utf-8, encoding/decoding with replace
+# df = final_chat_df[a.columns].compare(a)
+# def safe_encode(x):
+#    if isinstance(x, str) or hasattr(x, "encode"):
+#        return x.encode("utf-8", "ignore").decode("utf-8", "ignore")
+#    return x
+# df = final_chat_df[a.columns].compare(a)
+# for column in df.columns:
+#    df[column] = df[column].apply(safe_encode)
+# print(df[~df["conversation"]["self"].isna()]["conversation"])
+# a = recover_csv("data_dump/results_01_23.csv", index_col=0)
+# Not quite right
+# a2 = recover_csv("data_dump/results2_01_25_34d63d4.csv", index_col=0)
+# c = [c for c in a2.columns if c != "sent_convo"]
+# results_df2[c].compare(a2[c])
+
+# results_df = recover_csv("data_dump/results_01_23.csv", index_col=0)
+# analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
 # %% # analysis pre-processing
 # results_df = copy.deepcopy(results_df2)
 print("Results with completion", results_df.groupby("new_model")["new_completion"].count())
@@ -687,6 +760,7 @@ analysis_df2 = make_analysis_df(results_df2[~results_df2["new_oai_mod"].isna()],
 analysis_df2.to_csv(f"data_dump/analysis_df2_01_25_{git_hash()}.csv")
 analysis_df2.to_pickle(f"data_dump/analysis_df2_01_25_{git_hash()}.pkl")
 
+# analysis should concat both 1 and 2
 # %%
 # scrape analysis
 from scipy import stats
