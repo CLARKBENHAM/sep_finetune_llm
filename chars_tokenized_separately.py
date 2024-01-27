@@ -9,6 +9,7 @@ from joblib import Parallel, delayed
 from itertools import takewhile, accumulate
 import time
 import ast
+from collections import Counter
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -92,6 +93,7 @@ chat_df = pd.concat([pd.read_parquet(f) for f in files if "lmsys-chat-1m" in f],
 # )
 
 
+# %%
 # Just use pickles unless absolutely have to
 def recover_csv(
     path,
@@ -100,30 +102,39 @@ def recover_csv(
     **kwargs,
 ):
     df = pd.read_csv(path, **kwargs)
+    for c in json_cols:
+        print("s", c)
+        if c in df:
+            try:
+                df[c] = df[c].apply(lambda x: np.array(json.loads(x)))
+            except:
+                print(c)
+                pass
     for c in df.columns:
         try:
             df[c] = df[c].apply(ast.literal_eval)
-            print(c, sum(df[c].isna()))
+            print("worked", c, sum(df[c].isna()))
         except Exception as e:
-            print(e)
-    print(df.shape)
+            print(c, e)
     for c in arr_cols:
         if c in df:
-            df[c] = df[c].map(
-                lambda x: np.array(
-                    [
-                        {
-                            **d,
-                            "content": d["content"]
-                            .encode("utf-16", "surrogatepass")
-                            .decode("utf-16"),
-                        }
-                        for d in x
-                    ]
+            try:
+                df[c] = df[c].map(
+                    lambda x: np.array(
+                        [
+                            {
+                                **d,
+                                "content": d["content"]
+                                .encode("utf-16", "surrogatepass")
+                                .decode("utf-16"),
+                            }
+                            for d in x
+                        ]
+                    )
                 )
-            )
-    for c in json_cols:
-        df[c] = df[c].apply(json.loads)
+            except:
+                pass
+    print(df.shape)
     return df
 
 
@@ -468,9 +479,9 @@ final_chat_df_summaries(final_chat_df3, chat_df3)
 #    final_chat_df[c] = final_chat_df[c].apply(lambda l: json.dumps(list(l)))
 # final_chat_df.to_csv(f"data_dump/preprocessing_chat_df_250_{git_hash()}.csv", index=False)
 
-# final_chat_df2.to_pickle(f"data_dump/final_chat_df2_250_{git_hash()}.pkl") # data_dump/final_chat_df2_250_34d63d4.pkl
-
-# final_chat_df3.to_pickle(f"data_dump/final_chat_df3_250_{git_hash()}.pkl") # data_dump/final_chat_df3_250_6290f6d.pkl
+final_chat_df.to_pickle(f"data_dump/final_chat_df_{git_hash()}.pkl")
+final_chat_df2.to_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
+final_chat_df3.to_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 # Finished preprocessing
 # %%
 
@@ -480,9 +491,9 @@ client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
 
-# final_chat_df = recover_csv("data_dump/preprocessing_chat_df_250.csv")
-# final_chat_df2 = pd.read_pickle(f"data_dump/final_chat_df2_250_{git_hash()}.pkl")
-# final_chat_df3 = pd.read_pickle(f"data_dump/final_chat_df3_250_{git_hash()}.pkl")
+final_chat_df = pd.read_pickle(f"data_dump/final_chat_df_{git_hash()}.pkl")
+final_chat_df2 = pd.read_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
+final_chat_df3 = pd.read_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 
 ORD_USE_BETWEEN = [
     0,  # most unique
@@ -537,17 +548,8 @@ def _mrf(final_chat_df):
 
 
 results_frame = _mrf(final_chat_df)
-print(results_frame[results_df.columns].compare(results_df))
-# %%
-# results_frame = _mrf(final_chat_df)
-# # Not quite the same for results_df since final_chat_df was later feed through end_of_convo
-# print(results_frame[results_df.columns].compare(results_df))
 results_frame2 = _mrf(final_chat_df2)
-# print(results_frame2[results_df2.columns].compare(results_df2))
-# Won't work since some convos have more turns than others
-for c in results_df2.columns[1:]:
-    print(c, results_frame2[c].compare(results_df2[c]))
-print(sum(results_df2["new_oai_mod"].isna()), len(results_df2))
+results_frame3 = _mrf(final_chat_df3)
 
 
 # %%
@@ -653,26 +655,95 @@ plt.hist(
         lambda openai_moderation: max(openai_moderation[0]["category_scores"].values())
     ),
 )
-
-
 # %% Recover
-# WARN: final_chat_df might not be creatable by code used below
+# WARN: results_df was slightly different sent_convo from expected
 exp_final_chat_df = recover_csv("data_dump/preprocessing_chat_df_250_34d63d4.csv")
-exp_results_df = recover_csv("data_dump/results_01_24_beb23c3.csv")
-exp_analysis_df = recover_csv("data_dump/analysis_df_01_24_beb23c3.csv")
+exp_results_df = recover_csv("data_dump/results_01_24_beb23c3.csv", index_col=0)
+exp_analysis_df = recover_csv("data_dump/analysis_df_01_24_beb23c3.csv", index_col=0)
 
 exp_final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_250_34d63d4.pkl")
 exp_results_df2 = pd.read_pickle("data_dump/results2_01_25_34d63d4.pkl")
 exp_analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
 
+assert final_chat_df[exp_final_chat_df.columns].equals(exp_final_chat_df)
 print(
-    exp_final_chat_df.equals(final_chat_df),
+    exp_final_chat_df.equals(final_chat_df),  # false from column order
     # exp_results_df.equals(results_df),
     # exp_analysis_df.equals(analysis_df),
     exp_final_chat_df2.equals(final_chat_df2),
-    # exp_results_df2.equals(results_df2),
+    # exp_results_df2.equals(results_df2), # results different from sent_convo, seems encoding changed(?!)
     # exp_analysis_df2.equals(analyssi_df2),
 )
+
+# results slightly different, mostly for None's (!)
+# print(results_frame2[results_df2.columns].compare(results_df2))
+print(
+    np.sum(exp_results_df["sent_convo"].apply(str) == _mrf(final_chat_df)["sent_convo"].apply(str))
+)  # 1834
+print(
+    np.sum(
+        exp_results_df2["sent_convo"].apply(str) == _mrf(final_chat_df2)["sent_convo"].apply(str)
+    )
+)  # 1991
+print(
+    Counter(
+        results_frame2[
+            results_frame2["sent_convo"].apply(str) != exp_results_df2["sent_convo"].apply(str)
+        ]["manipulation"].map(lambda d: d["sep"])
+    ),
+    Counter(
+        results_frame[
+            results_frame["sent_convo"].apply(str) != exp_results_df["sent_convo"].apply(str)
+        ]["manipulation"].map(lambda d: d["sep"])
+    ),
+)
+print(
+    exp_final_chat_df2["conversation"].apply(str).nunique(),
+    exp_results_df2["sent_convo"].apply(str).nunique(),
+    exp_final_chat_df["conversation"].apply(str).nunique(),
+    exp_results_df["sent_convo"].apply(str).nunique(),
+)
+# 250 2247 247 1976
+# final_chat_df had 3 dups, 247*8=1976 so that checks
+# I must've messed up the sent convos for gpt-4-1106-preview?
+# %%
+# this all balances
+# b11 = exp_results_df[exp_results_df["new_model"] == "gpt-4-1106-preview"]
+# b06 = exp_results_df[
+#    (exp_results_df["new_model"] == "gpt-4-0613") & exp_results_df["manipulation"].apply(lambda d: d["sep"] is None)
+# ]
+# print(np.sum(b11["sent_convo"].apply(str) == b06["sent_convo"].apply(str)),
+# b11["sent_convo"].apply(num_tokens_from_messages)- b06["sent_convo"].apply(num_tokens_from_messages))
+
+
+# a=exp_results_df2[exp_results_df2['new_model'] == 'gpt-4-0613']
+# a[a['sent_convo'].apply(str).duplicated()], a.shape
+b11 = exp_results_df2[exp_results_df2["new_model"] == "gpt-4-1106-preview"]
+b06 = exp_results_df2[
+    (exp_results_df2["new_model"] == "gpt-4-0613")
+    & exp_results_df2["manipulation"].apply(lambda d: d["sep"] is None)
+]
+print(
+    np.sum(b11["sent_convo"].apply(str) == b06["sent_convo"].apply(str)),
+    b11["sent_convo"].apply(num_tokens_from_messages)
+    - b06["sent_convo"].apply(num_tokens_from_messages),
+)
+# %%
+# but not below for some
+results_frame["sent_convo"].map(str).compare(exp_results_df["sent_convo"].map(str))
+results_frame2["sent_convo"].map(str).compare(exp_results_df2["sent_convo"].map(str))
+# index is changed, exp_results_df has bad index,
+
+frame_cols = [c for c in results_df if c not in ("new_completion", "new_oai_mod")]
+results_frame[frame_cols].compare(exp_results_df[frame_cols])
+
+results_frame[exp_results_df.columns].apply(str).compare(exp_results_df.apply(str))  # nothing
+results_frame[exp_results_df.columns].apply(str, axis=1).compare(exp_results_df.apply(str, axis=1))
+
+# Won't work since some convos have more turns than others
+for c in results_df2.columns[1:]:
+    print(c, results_frame2[c].compare(results_df2[c]))
+print(sum(results_df2["new_oai_mod"].isna()), len(results_df2))
 
 
 # a = recover_csv("data_dump/preprocessing_chat_df_250.csv")
