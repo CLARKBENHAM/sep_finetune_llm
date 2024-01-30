@@ -33,6 +33,7 @@ MN_TOKENS = 50
 
 # HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
 HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
+pd.set_option("display.max_colwidth", 1000)
 
 
 def git_hash():
@@ -801,12 +802,12 @@ def make_analysis_df(results_df, final_chat_df):
 
 
 # analysis_df = make_analysis_df(results_df[~results_df["new_oai_mod"].isna()], final_chat_df)
-# analysis_df.to_pickle(f"data_dump/analysis_df_01_24_{git_hash()}.pkl")
+# analysis_df.to_pickle(f"data_dump/analysis_df_01_30_{git_hash()}.pkl")
 #
 # analysis_df2 = make_analysis_df(results_df2[~results_df2["new_oai_mod"].isna()], final_chat_df2)
 # analysis_df2.to_pickle(f"data_dump/analysis_df2_01_25_{git_hash()}.pkl")
 
-analysis_df3 = make_analysis_df(results_df3[~results_df3["new_oai_mod"].isna()], final_chat_df3)
+analysis_df3 = make_analysis_df(results_df3, final_chat_df3)
 analysis_df3.to_pickle(f"data_dump/analysis_df3_01_26_{git_hash()}.pkl")
 
 # analysis should concat both 1 and 2
@@ -977,6 +978,7 @@ from scipy.stats import ks_2samp
 import hashlib
 from itertools import combinations
 from matplotlib import colors
+import math
 
 
 def str_to_color(string):
@@ -994,20 +996,21 @@ def str_to_color(string):
     return colors.hsv_to_rgb((hue, sat, v))
 
 
+def get_name(d, n, default=""):
+    if n is None:
+        n = getattr(d, "name", None)
+    if n is None:
+        n = getattr(d, "columns", [None])[0]
+    if n is None:
+        n = default
+    return n
+
+
 def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
     if ax is None:
         fig, ax = plt.subplots()
 
-    def get_name(d, c):
-        if c is None:
-            c = getattr(d, "name", None)
-        if c is None:
-            c = getattr(d, "columns", [None])[0]
-        if c is None:
-            c = "1" if d == data1 else "2"
-        return c
-
-    col1, col2 = get_name(data1, col1), get_name(data2, col2)
+    col1, col2 = get_name(data1, col1, "1"), get_name(data2, col2, "2")
     # sns.histplot(data1, color=str_to_color(col1), alpha=0.5, label=col1, ax=ax)
     # sns.histplot(data2, color=str_to_color(col2), alpha=0.5, label=col2, ax=ax)
     ax.hist(
@@ -1030,7 +1033,7 @@ def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
     color = "red" if p_value < sig_level else "black"
     ax.set_title(title, color=color)
     ax.legend()
-    # return ax
+    return ax
 
 
 def plot_comparisons(df, cat_col, score_col, comparison_type="categorical", sig_level=0.01):
@@ -1099,12 +1102,13 @@ def plot_comparisons(df, cat_col, score_col, comparison_type="categorical", sig_
 #     )
 
 
-def create_combined_plot(datas):
+def create_combined_plot(datas, plot_fn=_ks_hist_plot):
     fig, axs = plt.subplots(len(datas), 1, figsize=(10, 5 * len(datas)))
+    axs = np.atleast_1d(axs)
     # Iterate over data pairs and create subplots
     for idx, (data1, data2) in enumerate(datas):
         ax = axs[idx]
-        _ks_hist_plot(data1, data2, ax=ax)
+        plot_fn(data1, data2, ax=ax)
     fig.tight_layout()
     return fig
 
@@ -1221,6 +1225,25 @@ def reg_plot(
     plt.show()
 
 
+def avg_by_bucket(X, Y, x_name=None, y_name=None, ax=None):
+    """Bin X. Then plot average Y's for each bin of X"""
+    x_name, y_name = get_name(X, x_name, "X"), get_name(Y, y_name, "Y")
+    if ax is None:
+        fig, ax = plt.subplots()
+    buckets = pd.cut(X, bins=min(20, math.ceil((len(X) + 1) / 10)))
+    bucket_means = pd.DataFrame({x_name: X, y_name: Y}).groupby(buckets)[y_name].mean()
+    ax.bar(range(len(bucket_means)), bucket_means, color=str_to_color(y_name))
+    ax.set_xticks(
+        range(len(bucket_means)),
+        [f"{interval.mid:.0f}" for interval in bucket_means.index],
+        rotation=90,
+    )
+    ax.set_xlabel(x_name)
+    ax.set_ylabel(y_name)
+    ax.figure.tight_layout()
+    return ax
+
+
 def prompt_lengths_vs_max_score(analysis_df):
     """
     plot both prompt length and output length vs max mod score
@@ -1246,57 +1269,96 @@ def prompt_lengths_vs_max_score(analysis_df):
     reg_plot(prompt_lens, score_diff, "sent prompt num tokens", "max mod score - default score")
 
     # Average mod by prompt len
-    buckets = pd.cut(prompt_lens, bins=20)
-    bucket_means = (
-        pd.DataFrame({"prompt_lens": prompt_lens, "Y": score_diff}).groupby(buckets)["Y"].mean()
+    ax = avg_by_bucket(
+        prompt_lens, score_diff, "Sent Mod Prompt Lengths", "Avg Max Mod - default mod score"
     )
-    plt.bar(range(len(bucket_means)), bucket_means)
-    plt.xticks(range(len(bucket_means)), [f"{interval.mid:.0f}" for interval in bucket_means.index])
-    plt.xticks(rotation=90)
-    plt.xlabel("Sent Mod Prompt Lengths")
-    plt.ylabel("Avg Max Mod - default mod score")
-    plt.tight_layout()
     plt.show()
 
-    buckets = pd.cut(og_prompt_lens, bins=20)
-    bucket_means = (
-        pd.DataFrame({"og_prompt_lens": og_prompt_lens, "Y": score_diff})
-        .groupby(buckets)["Y"]
-        .mean()
+    ax = avg_by_bucket(
+        og_prompt_lens, score_diff, "Original Convo Lengths", "Avg Max Mod - default mod score"
     )
-    plt.bar(range(len(bucket_means)), bucket_means)
-    plt.xticks(range(len(bucket_means)), [f"{interval.mid:.0f}" for interval in bucket_means.index])
-    plt.xticks(rotation=90)
-    plt.xlabel("Original Convo Lengths")
-    plt.ylabel("Avg Max Mod - default mod score")
-    plt.tight_layout()
     plt.show()
 
 
-def max_mod_scores_by_manipulation(analysis_df, m="gpt40613"):
+def score_vs_length_by_manipulation(analysis_df, m="gpt40613"):
     new_max_scores = analysis_df["new_max_scores"]
-    cont_max_scores = analysis_df[f"{m}_max_scores"]
-    cont_max_scores = cont_max_scores.groupby(cont_max_scores.index).first()
-    cont_max_scores.name = "Max Mod score no manipulation {m}"
-    datas = []
+    score_diff = new_max_scores - analysis_df[f"{m}_max_scores"]
+    prompt_lens = analysis_df["sent_convo"].apply(num_tokens_from_messages)
+    og_prompt_lens = analysis_df["conversation"].apply(num_tokens_from_messages)
+    og_prompt_lens.name = "Original Convo Lengths"
+    lens_datas = []
+    og_lens_datas = []
     for d in analysis_df["mod_how_str"].unique():
         ix = analysis_df["mod_how_str"] == d
-        d1 = new_max_scores[ix]
-        d1.name = f"Max Mod score with {d}"
-        datas += [(d1, cont_max_scores)]
-    fig = create_combined_plot(datas)
-    return fig
+        sd = score_diff[ix]
+        pl = prompt_lens[ix]
+        og_pl = og_prompt_lens[ix]  # always the same
+        sd.name = f"Avg {d} Mod - Default score for {m}"
+        prompt_lens.name = f"Sent Mod {m} Prompt Lengths"
+        lens_datas += [(pl, sd)]
+        og_lens_datas += [(og_pl, sd)]
+    fig = create_combined_plot(lens_datas, plot_fn=avg_by_bucket)
+    fig.suptitle("Score Diff vs Lens as Sent by manipulation")
+    plt.show()
+    og_fig = create_combined_plot(og_lens_datas, plot_fn=avg_by_bucket)
+    og_fig.suptitle("Score Diff vs lens of original prompt by manipulation")
+    plt.show()
+    return fig, og_fig
 
+
+def score_by_mod_vs_length(analysis_df, m="gpt40613", categories=categories, og_cat_min=0.2):
+    prompt_lens = analysis_df["sent_convo"].apply(num_tokens_from_messages)
+    og_prompt_lens = analysis_df["conversation"].apply(num_tokens_from_messages)
+    og_prompt_lens.name = "Original Convo Lengths"
+    prompt_lens.name = f"Sent Mod Prompt Lengths"
+    lens_datas = []
+    og_lens_datas = []
+    for c in categories:
+        score_diff = analysis_df[f"new_{c}"] - analysis_df[f"{m}_{c}"]
+        score_diff.name = f"{c.upper()} Avg Mod - Default score for {m}"
+        if og_cat_min is None:
+            lens_datas += [(prompt_lens, score_diff)]
+            og_lens_datas += [(og_prompt_lens, score_diff)]
+        else:
+            ix = analysis_df[c] >= og_cat_min
+            if sum(ix) == 0:
+                continue
+            lens_datas += [(prompt_lens[ix], score_diff[ix])]
+            og_lens_datas += [(og_prompt_lens[ix], score_diff[ix])]
+    og_fig = create_combined_plot(og_lens_datas, plot_fn=avg_by_bucket)
+    # fig = create_combined_plot(lens_datas, plot_fn=avg_by_bucket)
+    if og_cat_min is None:
+        # fig.suptitle("Split by Category: score diff vs sent lens")
+        og_fig.suptitle("Split by Category: score diff vs original lens")
+    else:
+        # fig.suptitle(
+        #    f"Split by Category where og category >= {og_cat_min}: score diff vs sent lens"
+        # )
+        og_fig.suptitle(
+            f"Split by Category where og category >= {og_cat_min}: score diff vs original"
+        )
+    # fig.show()
+    og_fig.show()
+    return fig, og_fig
+
+
+# fig, og_fig = score_by_mod_vs_length(analysis_df, m="gpt40613")
+fig, og_fig = score_by_mod_vs_length(analysis_df3, m="gpt40613", og_cat_min=0.1)
+fig, og_fig = score_by_mod_vs_length(analysis_df3, m="gpt40613", og_cat_min=0.7)
+# fig,og_fig = score_vs_length_by_manipulation(analysis_df, m="gpt40613")
+# fig2,og_fig2 = score_vs_length_by_manipulation(analysis_df, m="gpt41106preview")
 
 # obvious relationship with output length
 # slight relationship with input length, max scores in 2700-5700 range
 # prompt_lengths_vs_max_score(analysis_df)
 # prompt_lengths_vs_max_score(analysis_df2[~analysis_df2["gpt40613_oai_mod"].isna()])
-prompt_lengths_vs_max_score(analysis_df)
-prompt_lengths_vs_max_score(analysis_df3)
-c = pd.concat([analysis_df, analysis_df3])
-print_summaries(c)
-prompt_lengths_vs_max_score(c)
+
+# prompt_lengths_vs_max_score(analysis_df)
+# prompt_lengths_vs_max_score(analysis_df3)
+# c = pd.concat([analysis_df, analysis_df3])
+# print_summaries(c)
+# prompt_lengths_vs_max_score(c)
+
 # Where technique has biggest uplift, %25 of the data
 # prompt_lengths_vs_max_score(analysis_df[analysis_df["sent_convo"].apply(num_tokens_from_messages).isin(range(2000, 5000))])
 # d=analysis_df[analysis_df["sent_convo"].apply(num_tokens_from_messages).isin(range(2000, 5500))]
@@ -1357,9 +1419,12 @@ with open(f"data_dump/flagged_rows_{git_hash()}.txt", "w") as f:
 
 # %%
 # For testing Chat Apps, which inital messages don't get flagged?
-import pyperclip
-
-check = analysis_df[analysis_df["new_sexual"] > 0.9].sort_values("new_sexual", ascending=False)
+# check = analysis_df[analysis_df["new_sexual"] > 0.9].sort_values("new_sexual", ascending=False)
+check = analysis_df.loc[
+    (analysis_df["new_max_scores"] - analysis_df["gpt41106preview_max_scores"])
+    .sort_values(ascending=False)
+    .index
+]
 firsts = [
     (r["sent_convo"][:1], r["manipulation"]["sep"], ix)
     for ix, (_, r) in enumerate(check.iterrows())
@@ -1384,25 +1449,38 @@ with ThreadPoolExecutor(max_workers=10) as executor:
     print(list(sorted(together, key=lambda t: t[0], reverse=True)))
 
 # %%  Test Chat Apps
+import pyperclip
+
 # for *_, iix in together[1:]:
 #    r = check.iloc[iix]
-for _, r in check[check["conversation_id"] == "3f90d084be1b4605ac228a3fc334d533"].iterrows():
+# nothing for "3f90d084be1b4605ac228a3fc334d533"
+ix = list(
+    sorted(
+        (
+            (r["new_max_scores"] - r["gpt41106preview_max_scores"], ix)
+            for ix, r in analysis_df.iterrows()
+        ),
+        reverse=True,
+    )
+)
+for _, r in check[check["conversation_id"] == "b64789b3b7344e2b8a826b4b1327b4fd"].iterrows():
     print(ord(r["manipulation"]["sep"]))
     if ord(r["manipulation"]["sep"]) in [
-        0,
+        # 0,
         192,
-        11,
-        255,
+        # 11,
+        # 255,
         8,
         1000,
         190,
     ]:
         continue
-    for d in r["sent_convo"]:
+    # for d in r["sent_convo"]:
+    for d in analysis_df.iloc[ix[0][1]]["sent_convo"]:
         if d["role"] == "user":
             pyperclip.copy(d["content"])
             i = input("continue?")
-            if i not in ("\n", "y"):
+            if i not in ("", "\n", "y"):
                 print(1 / 0)
         else:
             print(d["role"])
