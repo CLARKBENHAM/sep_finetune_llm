@@ -44,10 +44,13 @@ def git_hash():
 # https://huggingface.co/datasets/lmsys/lmsys-chat-1m/tree/main/data
 # https://huggingface.co/datasets/kjj0/4chanpol-openaimod/tree/main/data
 ds_urls = {
-    # WARN: these older moderation endpoint with only 11 vs. 18 from text-model-005 under 'stable'
+    # WARN: these from older moderation endpoint with only 11 vs. 18 now from text-model-005 under 'stable'
     "lmsys-chat-1m": [
         "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/resolve/main/data/train-00000-of-00006-4feeb3f83346a0e9.parquet",
         "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/resolve/main/data/train-00001-of-00006-4030672591c2f478.parquet",
+        # chat_df4
+        "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/blob/main/data/train-00002-of-00006-1779b7cec9462180.parquet",
+        "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/blob/main/data/train-00003-of-00006-2fa862bfed56af1f.parquet",
     ],
     "4chanpol-openaimod": [
         "https://huggingface.co/datasets/kjj0/4chanpol-openaimod/blob/main/data/train-00000-of-00048-6b6dfb39b513b835.parquet",
@@ -84,6 +87,13 @@ files = [
     "data_dump/4chanpol-openaimod/train-00000-of-00048-6b6dfb39b513b835.parquet",
 ]
 chat_df = pd.concat([pd.read_parquet(f) for f in files if "lmsys-chat-1m" in f], ignore_index=True)
+filesb = [
+    "data_dump/lmsys-chat-1m/train-00002-of-00006-1779b7cec9462180.parquet",
+    "data_dump/lmsys-chat-1m/train-00003-of-00006-2fa862bfed56af1f.parquet",
+]
+chat_dfb = pd.concat(
+    [pd.read_parquet(f) for f in filesb if "lmsys-chat-1m" in f], ignore_index=True
+)
 # completion_df = pd.concat(
 #    [pd.read_parquet(f) for f in files if "4chanpol-openaimod" in f], ignore_index=True
 # )
@@ -314,11 +324,17 @@ def choose_columns(X, y, n_ret_cols, make_plots=False, min_pca_explained=0.90, n
     )
 
 
-chat_df = chat_df[parallel_apply(chat_df["conversation"], prefilter_chats, n_jobs=8)]
-chat_df = chat_df.reset_index(drop=True)
-# explode columns for filtering
-chat_df = chat_df.join(pd.DataFrame(chat_df["openai_moderation"].apply(_chat_max_by_cat).tolist()))
-chat_df["any_flagged"] = chat_df["openai_moderation"].apply(_chat_is_flagged)
+def make_chat_df(df):
+    df = df[parallel_apply(df["conversation"], prefilter_chats, n_jobs=8)]
+    df = df.reset_index(drop=True)
+    # explode columns for filtering
+    df = df.join(pd.DataFrame(df["openai_moderation"].apply(_chat_max_by_cat).tolist()))
+    df["any_flagged"] = df["openai_moderation"].apply(_chat_is_flagged)
+    return df
+
+
+chat_df = make_chat_df(chat_df)
+chat_dfb = make_chat_df(chat_dfb)
 
 chat_df2 = copy.deepcopy(
     chat_df[
@@ -333,25 +349,27 @@ chat_df2 = chat_df2[~chat_df2["conversation_id"].isin(analysis_df["conversation_
 # chat_df3 is a different preprocessing of chat_df2
 chat_df3 = copy.deepcopy(chat_df2)
 
-# %% Select Rows
-# # summary stats
-# print(f"% flagged: {chat_df['any_flagged'].mean()*100:.1f}%, {chat_df['any_flagged'].sum()}")
-# cat_flagged = pd.DataFrame(chat_df["openai_moderation"].apply(_chat_flagged_by_cat).values.tolist())
-# print(
-#    chat_df["any_flagged"].mean(),
-#    cat_flagged.mean(axis=0).sum(),
-#    "\n",
-#    cat_flagged.mean(axis=0).sort_values(),
-# )
-# d = chat_df["any_flagged"] != cat_flagged.apply(any, axis=1)
-# print(
-#    "Num flagged by category but not by total output",
-#    d.sum(),
-#    f"{d.mean()*100:.1f}%",
-# )
 
+# %% Select Rows
 N_PER_CATEGORY = 50
 test_columns = ["sexual", "harassment", "violence", "sexual/minors", "self-harm/instructions"]
+
+
+def _initial_summary_stats(df):
+    print(f"% flagged: {df['any_flagged'].mean()*100:.1f}%, {df['any_flagged'].sum()}")
+    cat_flagged = pd.DataFrame(df["openai_moderation"].apply(_chat_flagged_by_cat).values.tolist())
+    print(
+        df["any_flagged"].mean(),
+        cat_flagged.mean(axis=0).sum(),
+        "\n",
+        cat_flagged.mean(axis=0).sort_values(),
+    )
+    d = df["any_flagged"] != cat_flagged.apply(any, axis=1)
+    print(
+        "Num flagged by category but not by total output",
+        d.sum(),
+        f"{d.mean()*100:.1f}%",
+    )
 
 
 def select_rows(chat_df, n_per_cat, test_columns, _first_chat_df_hack=False):
@@ -416,6 +434,23 @@ final_chat_df = select_rows(
     chat_df, n_per_cat=N_PER_CATEGORY, test_columns=test_columns, _first_chat_df_hack=True
 )
 
+final_chat_dfb = select_rows(  # Optimization
+    chat_dfb, n_per_cat=N_PER_CATEGORY * 5, test_columns=test_columns, _first_chat_df_hack=True
+)
+final_chat_dfb["conversation"] = final_chat_dfb["conversation"].apply(
+    lambda c: end_of_convo(c, max_tokens=8196 // 2 - 500 - 50)
+)
+final_chat_dfb = final_chat_dfb[
+    parallel_apply(
+        final_chat_dfb["conversation"],
+        lambda m: prefilter_chats(m, mn_tokens=750, mx_tokens=2500),
+        n_jobs=8,
+    )
+]
+final_chat_dfb = select_rows(
+    final_chat_dfb, n_per_cat=N_PER_CATEGORY, test_columns=test_columns, _first_chat_df_hack=True
+)
+
 final_chat_df2 = select_rows(
     chat_df2,
     n_per_cat=N_PER_CATEGORY,
@@ -470,6 +505,7 @@ def final_chat_df_summaries(final_chat_df, chat_df):
 
 
 final_chat_df_summaries(final_chat_df, chat_df)
+final_chat_df_summaries(final_chat_dfb, chat_dfb)
 final_chat_df_summaries(final_chat_df2, chat_df2)
 final_chat_df_summaries(final_chat_df3, chat_df3)
 
@@ -479,6 +515,7 @@ final_chat_df_summaries(final_chat_df3, chat_df3)
 # final_chat_df.to_csv(f"data_dump/preprocessing_chat_df_250_{git_hash()}.csv", index=False)
 
 final_chat_df.to_pickle(f"data_dump/final_chat_df_{git_hash()}.pkl")
+final_chat_dfb.to_pickle(f"data_dump/final_chat_dfb_{git_hash()}.pkl")
 final_chat_df2.to_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
 final_chat_df3.to_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 # Finished preprocessing
@@ -491,6 +528,7 @@ client = OpenAI(
 )
 
 final_chat_df = pd.read_pickle(f"data_dump/final_chat_df_{git_hash()}.pkl")
+final_chat_dfb = pd.read_pickle(f"data_dump/final_chat_dfb_{git_hash()}.pkl")
 final_chat_df2 = pd.read_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
 final_chat_df3 = pd.read_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 
@@ -547,6 +585,7 @@ def _mrf(final_chat_df):
 
 
 results_frame = _mrf(final_chat_df)
+results_frameb = make_results_frame(final_chat_dfb, ord_vals=[8, 192, None])
 results_frame2 = _mrf(final_chat_df2)
 results_frame3 = _mrf(final_chat_df3)
 
@@ -638,25 +677,28 @@ def fill_out_results(df_frame, n_loops=1):
     return results_df
 
 
-# r = copy.deepcopy(results_frame3.iloc[:50])
+# r = copy.deepcopy(results_frameb.iloc[:50])
 # _r = copy.deepcopy(r)
 # r = fill_out_results(r)
 ## where different
 # print(r.compare(_r))
 # plt.hist(
-#    r.compare(_r)["new_oai_mod"]["self"].apply(_chat_max_scores),
+#   r.compare(_r)["new_oai_mod"]["self"].apply(_chat_max_scores),
 # )
 # plt.show()
 # plt.hist(
 #    _r[~_r["new_oai_mod"].isna()]["new_oai_mod"].apply(_chat_max_scores),
 # )
-# results_frame3["new_oai_mod"].iloc[:50], results_frame3["new_completion"].iloc[:50] = (
-#   r["new_oai_mod"],
-#   r["new_completion"],
+# results_frameb["new_oai_mod"].iloc[:50], results_frameb["new_completion"].iloc[:50] = (
+#  r["new_oai_mod"],
+#  r["new_completion"],
 # )
 
 # results_df = fill_out_results(results_frame)
 # results_df.to_csv(f"data_dump/results_01_24_{git_hash()}.csv")
+
+results_dfb = fill_out_results(results_frameb)
+results_dfb.to_pickle(f"data_dump/resultsb_01_30_{git_hash()}.pkl")
 
 # results_df2 = fill_out_results(results_frame2)
 # results_df2.to_pickle(f"data_dump/results2_01_25_{git_hash()}.pkl")
@@ -803,12 +845,15 @@ def make_analysis_df(results_df, final_chat_df):
 
 # analysis_df = make_analysis_df(results_df[~results_df["new_oai_mod"].isna()], final_chat_df)
 # analysis_df.to_pickle(f"data_dump/analysis_df_01_30_{git_hash()}.pkl")
-#
+
+analysis_dfb = make_analysis_df(results_dfb, final_chat_dfb)
+analysis_dfb.to_pickle(f"data_dump/analysis_dfb_01_30_{git_hash()}.pkl")
+
 # analysis_df2 = make_analysis_df(results_df2[~results_df2["new_oai_mod"].isna()], final_chat_df2)
 # analysis_df2.to_pickle(f"data_dump/analysis_df2_01_25_{git_hash()}.pkl")
 
-analysis_df3 = make_analysis_df(results_df3, final_chat_df3)
-analysis_df3.to_pickle(f"data_dump/analysis_df3_01_26_{git_hash()}.pkl")
+# analysis_df3 = make_analysis_df(results_df3, final_chat_df3)
+# analysis_df3.to_pickle(f"data_dump/analysis_df3_01_26_{git_hash()}.pkl")
 
 # analysis should concat both 1 and 2
 # %%
@@ -857,7 +902,7 @@ def print_summaries(df):
         df.groupby("mod_how_str")["new_completion"].size(),
         "Num defaults: ",
         default["gpt40613_completion"].size,
-        default["gpt41106preview_completion"].size,
+        # default["gpt41106preview_completion"].size,
     )
 
     print(
@@ -1342,11 +1387,12 @@ def score_by_mod_vs_length(analysis_df, m="gpt40613", categories=categories, og_
     return fig, og_fig
 
 
-# fig, og_fig = score_by_mod_vs_length(analysis_df, m="gpt40613")
-fig, og_fig = score_by_mod_vs_length(analysis_df3, m="gpt40613", og_cat_min=0.1)
-fig, og_fig = score_by_mod_vs_length(analysis_df3, m="gpt40613", og_cat_min=0.7)
+# fig,og_fig = score_vs_length_by_manipulation(analysis_dfb, m="gpt40613")
 # fig,og_fig = score_vs_length_by_manipulation(analysis_df, m="gpt40613")
 # fig2,og_fig2 = score_vs_length_by_manipulation(analysis_df, m="gpt41106preview")
+fig, og_fig = score_by_mod_vs_length(analysis_dfb, m="gpt40613", og_cat_min=0.1)
+# fig, og_fig = score_by_mod_vs_length(analysis_df3, m="gpt40613", og_cat_min=0.1)
+# fig, og_fig = score_by_mod_vs_length(analysis_df3, m="gpt40613", og_cat_min=0.7)
 
 # obvious relationship with output length
 # slight relationship with input length, max scores in 2700-5700 range
