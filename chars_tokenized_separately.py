@@ -723,7 +723,7 @@ exp_analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
 
 exp_final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
 exp_results_df3 = pd.read_pickle("data_dump/results3_01_26_7486c8c.pkl")
-exp_analysis_df3 = pd.read_pickle("data_dump/")
+exp_analysis_df3 = pd.read_pickle("data_dump/analysis_df3_01_26_7486c8c.pkl")
 
 assert final_chat_df[exp_final_chat_df.columns].equals(exp_final_chat_df)
 print(
@@ -855,7 +855,7 @@ analysis_dfb.to_pickle(f"data_dump/analysis_dfb_01_30_{git_hash()}.pkl")
 # analysis_df3 = make_analysis_df(results_df3, final_chat_df3)
 # analysis_df3.to_pickle(f"data_dump/analysis_df3_01_26_{git_hash()}.pkl")
 
-# analysis should concat both 1 and 2
+# analysis should concat both 1 and 3?
 # %%
 # scrape analysis
 from scipy import stats
@@ -885,8 +885,8 @@ def avg_larger(d1, d2):
     )
     # .2f not valid for leven_test since __format__ not defined
     print(
-        f"{getattr(d1, 'name', 'd1')} vs {getattr(d2, 'name', 'd2')} Means: {np.mean(d1):.2f} vs"
-        f" {np.mean(d2):.2f} Same Mean: {t_test_result} Vars: {np.var(d1):.2f} vs"
+        f"{getattr(d1, 'name', 'd1')} vs {getattr(d2, 'name', 'd2')} Means: {np.mean(d1):.3f} vs"
+        f" {np.mean(d2):.3f} Same Mean: {t_test_result} Vars: {np.var(d1):.2f} vs"
         f" {np.var(d2):.2f} Same Var: {levene_test}"
     )
 
@@ -954,6 +954,7 @@ def print_summaries(df):
     plt.show()
 
 
+# print_summaries(analysis_dfb)
 # print_summaries(analysis_df)
 print_summaries(
     analysis_df[analysis_df["sent_convo"].apply(num_tokens_from_messages).isin(range(2000, 5000))]
@@ -1013,6 +1014,106 @@ def write_does_doesnt_help_csvs(analysis_df, name=""):
     )
 
 
+# %%
+from fuzzywuzzy import fuzz, process
+
+
+def has_dup(m):
+    c = [c["content"] for c in m]
+    return max(Counter(c).values()) > 1
+
+
+def filter_df(df, last_len=range(0, 200), avg_cutoff=0.5):
+    no_dup = ~df["conversation"].apply(has_dup)
+    good_last_len = (
+        df["conversation"].apply(lambda m: num_tokens_from_messages(m[-1:])).isin(last_len)
+    )
+
+    avg_mod = (
+        df["openai_moderation"].apply(lambda m: np.mean([_chat_max_scores([c]) for c in m]))
+        > avg_cutoff
+    )
+    return df[no_dup & good_last_len & avg_mod]
+
+
+# d = filter_df(analysis_dfb)
+# print_summaries(d)
+
+
+def fill_missing_indexes(sent2og, start, end):
+    if start > end:
+        return
+    if sent2og[start] is not None and sent2og[end] is not None:
+        expected_range = list(range(sent2og[start], sent2og[end] + 1))
+        sent2og[start : end + 1] = expected_range
+    elif sent2og[start] is not None:
+        fill_missing_indexes(sent2og, start + 1, end)
+    else:
+        fill_missing_indexes(sent2og, start, end - 1)
+
+
+def get_oai_mod_by_turn(r):
+    og_convo = r["conversation"]
+    og_mod = r["openai_moderation"]
+    sep = r["manipulation"]["sep"]
+    sent_as_text = r["sent_convo"]
+    if sep is not None:
+        sent_as_text = [{**c, "content": c["content"].replace(sep, "")} for c in sent_as_text]
+    sent2og = [None] * len(sent_as_text)
+    for six, sent in enumerate(sent_as_text):
+        for ix, og in enumerate(og_convo):
+            if sent["role"] == og["role"] and (
+                fuzz.ratio(sent["content"], og["content"]) >= 70
+                or fuzz.partial_ratio(sent["content"], og["content"]) >= 70
+            ):
+                # ixs.append(ix)
+                sent2og[six] = ix
+                break
+        # else:
+        #     print("No match for ", sent_as_text.index(sent))
+    # if (
+    #    sent2og[0] is None
+    #    or sent2og[-1] is None
+    #    or sent2og != list(range(sent2og[0], sent2og[-1] + 1))
+    # ):
+    #    print("BAD!")
+    #    print(
+    #        sent2og,
+    #        sent2og[0] is not None
+    #        and sent2og[-1] is not None
+    #        and list(range(sent2og[0], sent2og[-1] + 1)),
+    #    )
+    fill_missing_indexes(sent2og, 0, len(sent2og) - 1)
+
+    # for i in range(1, len(sent2og)):
+    #    if sent2og[i] is None:
+    #        if sent2og[i - 1] is not None and (i + 1 == len(sent2og) or sent2og[i + 1] is not None):
+    #            sent2og[i] = sent2og[i - 1] + 1
+
+    return sent2og
+    return [og_mod[v] if v is not None else None for v in sent2og]
+
+
+# d = all_df.apply(get_oai_mod_by_turn, axis=1)
+## d.apply(lambda l: min(l))
+# print("Num missing", d.apply(lambda l: sum([i is None for i in l])).sum())
+# print(
+#    "out of order",
+#    d.apply(
+#        lambda l: l[0] is not None and l[-1] is not None and l != list(range(l[0], l[-1] + 1))
+#    ).sum(),
+# )
+# no_dup = ~all_df["conversation"].apply(has_dup)
+d = all_df[no_dup].apply(get_oai_mod_by_turn, axis=1)
+# d.apply(lambda l: min(l))
+print("Num missing", d.apply(lambda l: sum([i is None for i in l])).sum())
+print(
+    "out of order",
+    d.apply(
+        lambda l: l[0] is not None and l[-1] is not None and l != list(range(l[0], l[-1] + 1))
+    ).sum(),
+)
+print("Non-sorted order", d.apply(lambda l: list(map(str, l)) != list(sorted(map(str, l)))).sum())
 # %%
 # function that takes data and plots histograms with ks divergence stat listed on them
 import pandas as pd
@@ -1162,7 +1263,7 @@ def max_mod_scores_by_manipulation(analysis_df, m="gpt40613"):
     new_max_scores = analysis_df["new_max_scores"]
     cont_max_scores = analysis_df[f"{m}_max_scores"]
     cont_max_scores = cont_max_scores.groupby(cont_max_scores.index).first()
-    cont_max_scores.name = "Max Mod score no manipulation {m}"
+    cont_max_scores.name = f"Max Mod score no manipulation {m}"
     datas = []
     for d in analysis_df["mod_how_str"].unique():
         ix = analysis_df["mod_how_str"] == d
@@ -1228,7 +1329,7 @@ def some_vs_no_manipulation_by_mod_category_where_og_flagged(analysis_df, flagge
 
 # # No difference restrict analysis to was flagged or not, nor does it matter what cutoff used
 # some_vs_no_manipulation_by_mod_category_where_og_flagged(
-#     analysis_df, lambda m, c: m["categories"][c]
+#     analysis_dfb, lambda m, c: m["categories"][c]
 # )
 # some_vs_no_manipulation_by_mod_category_where_og_flagged(
 #     analysis_df, lambda m, c: m["category_scores"][c] > 0.7
@@ -1275,7 +1376,10 @@ def avg_by_bucket(X, Y, x_name=None, y_name=None, ax=None):
     x_name, y_name = get_name(X, x_name, "X"), get_name(Y, y_name, "Y")
     if ax is None:
         fig, ax = plt.subplots()
-    buckets = pd.cut(X, bins=min(20, math.ceil((len(X) + 1) / 10)))
+    # equal width buckets
+    # buckets = pd.cut(X, bins=min(20, math.ceil((len(X) + 1) / 10)))
+    # equal num element buckets
+    buckets = pd.qcut(X, q=min(10, math.ceil((len(X) + 1) / 10)), duplicates="drop")
     bucket_means = pd.DataFrame({x_name: X, y_name: Y}).groupby(buckets)[y_name].mean()
     ax.bar(range(len(bucket_means)), bucket_means, color=str_to_color(y_name))
     ax.set_xticks(
@@ -1323,6 +1427,53 @@ def prompt_lengths_vs_max_score(analysis_df):
         og_prompt_lens, score_diff, "Original Convo Lengths", "Avg Max Mod - default mod score"
     )
     plt.show()
+
+
+# analysis_df = recover_csv("data_dump/analysis_df_01_24_beb23c3.csv", index_col=0)
+# analysis_df3 = pd.read_pickle("data_dump/analysis_df3_01_26_7486c8c.pkl")
+# all_df = pd.concat([analysis_df, analysis_dfb, analysis_df3, ])
+
+
+def last_prompt_lengths_vs_max_score(analysis_df):
+    """
+    plot length of the last message in terms of tokens for prompt and sent vs max mod score
+    """
+    last_prompt_lens = analysis_df["sent_convo"].apply(lambda m: num_tokens_from_messages(m[-1:]))
+    og_last_prompt_lens = analysis_df["conversation"].apply(
+        lambda m: num_tokens_from_messages(m[-1:])
+    )
+    new_max_scores = analysis_df["new_max_scores"]
+
+    score_diff = new_max_scores - analysis_df["gpt40613_max_scores"]
+    reg_plot(
+        last_prompt_lens,
+        score_diff,
+        "sent prompt last chat num tokens",
+        "max mod score - default score",
+    )
+
+    # Average mod by prompt len
+    ax = avg_by_bucket(
+        last_prompt_lens,
+        score_diff,
+        "Sent Mod last chat Prompt Lengths",
+        "Avg Max Mod - default mod score",
+    )
+    plt.show()
+
+    ax = avg_by_bucket(
+        og_last_prompt_lens,
+        score_diff,
+        "Original last chat Length",
+        "Avg Max Mod - default mod score",
+    )
+    plt.show()
+
+
+# last_prompt_lengths_vs_max_score(all_df)
+# last_prompt_lengths_vs_max_score(analysis_df)
+# last_prompt_lengths_vs_max_score(analysis_dfb)
+# last_prompt_lengths_vs_max_score(analysis_df3)
 
 
 def score_vs_length_by_manipulation(analysis_df, m="gpt40613"):
@@ -1390,7 +1541,7 @@ def score_by_mod_vs_length(analysis_df, m="gpt40613", categories=categories, og_
 # fig,og_fig = score_vs_length_by_manipulation(analysis_dfb, m="gpt40613")
 # fig,og_fig = score_vs_length_by_manipulation(analysis_df, m="gpt40613")
 # fig2,og_fig2 = score_vs_length_by_manipulation(analysis_df, m="gpt41106preview")
-fig, og_fig = score_by_mod_vs_length(analysis_dfb, m="gpt40613", og_cat_min=0.1)
+# fig, og_fig = score_by_mod_vs_length(analysis_dfb, m="gpt40613", og_cat_min=0.1)
 # fig, og_fig = score_by_mod_vs_length(analysis_df3, m="gpt40613", og_cat_min=0.1)
 # fig, og_fig = score_by_mod_vs_length(analysis_df3, m="gpt40613", og_cat_min=0.7)
 
@@ -1420,49 +1571,105 @@ fig, og_fig = score_by_mod_vs_length(analysis_dfb, m="gpt40613", og_cat_min=0.1)
 # plt.title("Prompt Lengths where manipulation was harmful")
 
 # %%
+for i in range(10):
+    df = analysis_dfb.iloc[50 * i : 50 + 50 * i]
+    default = df.groupby("conversation_id").first()
+    print(i * 50, 50 + 50 * i)
+    more_trues(df["new_any_flagged"], default["gpt40613_any_flagged"])
+# %%
 # Write the prompts to text to see where did/didn't respond
 import pprint
 
 cutoff = 0.8
+df = analysis_dfb
 with open(f"data_dump/flagged_rows_{git_hash()}.txt", "w") as f:
-    for ix in analysis_df.index.unique():
-        flagged_rows = [
-            r for _, r in analysis_df.loc[ix].iterrows() if r["new_max_scores"] > cutoff
-        ]
+    for ix in df.index.unique():
+        flagged_rows = [r for _, r in df.loc[ix].iterrows() if r["new_max_scores"] > cutoff]
         if not flagged_rows:
             continue
         flagged_for = set(
             (
-                (k, f'{max((r["new_oai_mod"][0]["category_scores"][k] for r in flagged_rows))}.2f')
+                (k, f'{max((r["new_oai_mod"][0]["category_scores"][k] for r in flagged_rows))}:.2f')
                 for r in flagged_rows
                 for k, v in r["new_oai_mod"][0]["category_scores"].items()
                 if v > cutoff
             )
         )
-        sep = analysis_df.loc[ix].iloc[0]["manipulation"]["sep"]
+        sep = df.loc[ix].iloc[0]["manipulation"]["sep"]
         prompt = pprint.pformat(
             [
                 {**d, "content": d["content"].replace(sep, "")}
-                for d in analysis_df.loc[ix].iloc[0]["sent_convo"]
-            ]
+                for d in df.loc[ix].iloc[0]["sent_convo"]
+            ],
+            width=120,
         )
-        default_completion = pprint.pformat(analysis_df.loc[ix].iloc[0]["gpt40613_completion"])
+        # default_completion = pprint.pformat(df.loc[ix].iloc[0]["gpt40613_completion"])
         chunk = (
             "\n######### Index:"
-            f" {ix} Num Rows {len(flagged_rows)} {flagged_for} \n{prompt}\n{default_completion}"
+            f" {ix} Num Rows {len(flagged_rows)} {flagged_for} \n{prompt}"  # \n{default_completion}"
         )
+        sum_str = lambda d: f"{_chat_max_scores(d)} {_chat_max_by_cat(d)}"
+        chunk += f"\ndefault {sum_str(df.loc[ix].iloc[0]['gpt40613_oai_mod'])}"
         for r in flagged_rows:
-            scores = str(
-                {
-                    k: f"{v:.2f}"
-                    for k, v in r["new_oai_mod"][0]["category_scores"].items()
-                    if v > 0.1
-                }
-            )
-            com = pprint.pformat(r["new_completion"])
-            chunk += f"\n$$$ {r['mod_how_str']}\n{scores}\n{com}"
+            chunk += f"\n{r['mod_how_str']} {sum_str(r['new_oai_mod'])}"
+            # scores = str(
+            #    {
+            #        k: f"{v:.2f}"
+            #        for k, v in r["new_oai_mod"][0]["category_scores"].items()
+            #        if v > 0.1
+            #    }
+            # )
+            # com = pprint.pformat(r["new_completion"])
+            # chunk += f"\n$$$ {r['mod_how_str']}\n{scores}\n{com}"
         f.write(chunk)
 
+# %%
+cutoff = 0.4
+with open(f"data_dump/not_flagged_rows_{git_hash()}.txt", "w") as f:
+    for ix in df.index.unique():
+        if max([r["new_max_scores"] for _, r in df.loc[ix].iterrows()]) >= cutoff:
+            continue
+        not_flagged_rows = [r for _, r in df.loc[ix].iterrows()]
+        flagged_for = set(
+            (
+                (
+                    k,
+                    (
+                        f'{max((r["new_oai_mod"][0]["category_scores"][k] for r in not_flagged_rows))}:.2f'
+                    ),
+                )
+                for r in not_flagged_rows
+                for k, v in r["new_oai_mod"][0]["category_scores"].items()
+                if v > cutoff
+            )
+        )
+        sep = df.loc[ix].iloc[0]["manipulation"]["sep"]
+        prompt = pprint.pformat(
+            [
+                {**d, "content": d["content"].replace(sep, "")}
+                for d in df.loc[ix].iloc[0]["sent_convo"]
+            ],
+            width=120,
+        )
+        # default_completion = pprint.pformat(df.loc[ix].iloc[0]["gpt40613_completion"])
+        chunk = (
+            "\n######### Index:"
+            f" {ix} Num Rows {len(not_flagged_rows)} {flagged_for} \n{prompt}"  # \n{default_completion}"
+        )
+        sum_str = lambda d: f"{_chat_max_scores(d)} {_chat_max_by_cat(d)}"
+        chunk += f"\ndefault {sum_str(df.loc[ix].iloc[0]['gpt40613_oai_mod'])}"
+        for r in not_flagged_rows:
+            chunk += f"\n{r['mod_how_str']} {sum_str(r['new_oai_mod'])}"
+            # scores = str(
+            #    {
+            #        k: f"{v:.2f}"
+            #        for k, v in r["new_oai_mod"][0]["category_scores"].items()
+            #        if v > 0.1
+            #    }
+            # )
+            # com = pprint.pformat(r["new_completion"])
+            # chunk += f"\n$$$ {r['mod_how_str']}\n{scores}\n{com}"
+        f.write(chunk)
 # %%
 # For testing Chat Apps, which inital messages don't get flagged?
 # check = analysis_df[analysis_df["new_sexual"] > 0.9].sort_values("new_sexual", ascending=False)
