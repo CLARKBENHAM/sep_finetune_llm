@@ -826,6 +826,16 @@ analysis_df = pd.read_pickle("data_dump/analysis_df_01_30_3227533.pkl")
 analysis_dfb = pd.read_pickle("data_dump/analysis_dfb_01_30_2e513e8.pkl")
 analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
 analysis_df3 = pd.read_pickle("data_dump/analysis_df3_01_26_7486c8c.pkl")
+# analysis_df2 and 3 are similar
+analysis_all = pd.concat(
+    [
+        analysis_df,
+        analysis_dfb,
+        analysis_df3,
+    ]
+)
+
+
 # %%
 # scrape analysis
 from scipy import stats
@@ -985,6 +995,7 @@ def write_does_doesnt_help_csvs(analysis_df, name=""):
 
 
 # %%
+# Filter convos for where expect a continuation to be bad
 from fuzzywuzzy import fuzz, process
 
 
@@ -993,97 +1004,59 @@ def has_dup(m):
     return max(Counter(c).values()) > 1
 
 
-def filter_df(df, last_len=range(0, 200), avg_cutoff=0.5):
-    no_dup = ~df["conversation"].apply(has_dup)
+def filter_df(df, allow_dups=False, last_len=range(0, 200), avg_cutoff=0.5, plot_covar=False):
+    assert isinstance(last_len, range)
+    if allow_dups:
+        no_dup = [True] * len(df)
+    else:
+        no_dup = ~df["conversation"].apply(has_dup)
     good_last_len = (
         df["conversation"].apply(lambda m: num_tokens_from_messages(m[-1:])).isin(last_len)
     )
 
+    # aveage mod of all
     avg_mod = (
         df["openai_moderation"].apply(lambda m: np.mean([_chat_max_scores([c]) for c in m]))
         > avg_cutoff
     )
+    # # justlast responses
+    # avg_mod = (
+    #     df["openai_moderation"].apply(lambda m: np.mean([_chat_max_scores([c]) for c in m[-2:-1]]))
+    #     > avg_cutoff
+    # )
+    if plot_covar:  # corr < 0.25 for all 3
+        a_int = no_dup.astype(int)
+        b_int = good_last_len.astype(int)
+        c_int = avg_mod.astype(int)
+        cov_matrix = np.cov([a_int, b_int, c_int])
+        plt.imshow(cov_matrix, cmap="hot", interpolation="nearest")
+        plt.colorbar(label="Covariance")
+        # Add correlation numbers to the plot
+        for i in range(cov_matrix.shape[0]):
+            for j in range(cov_matrix.shape[1]):
+                plt.text(j, i, f"{cov_matrix[i, j]:.2f}", ha="center", va="center", color="black")
+        plt.show()
     return df[no_dup & good_last_len & avg_mod]
 
 
-# d = filter_df(analysis_dfb)
-# print_summaries(d)
-
-
-def fill_missing_indexes(sent2og, start, end):
-    if start > end:
-        return
-    if sent2og[start] is not None and sent2og[end] is not None:
-        expected_range = list(range(sent2og[start], sent2og[end] + 1))
-        sent2og[start : end + 1] = expected_range
-    elif sent2og[start] is not None:
-        fill_missing_indexes(sent2og, start + 1, end)
-    else:
-        fill_missing_indexes(sent2og, start, end - 1)
-
-
-def get_oai_mod_by_turn(r):
-    og_convo = r["conversation"]
-    og_mod = r["openai_moderation"]
-    sep = r["manipulation"]["sep"]
-    sent_as_text = r["sent_convo"]
-    if sep is not None:
-        sent_as_text = [{**c, "content": c["content"].replace(sep, "")} for c in sent_as_text]
-    sent2og = [None] * len(sent_as_text)
-    for six, sent in enumerate(sent_as_text):
-        for ix, og in enumerate(og_convo):
-            if sent["role"] == og["role"] and (
-                fuzz.ratio(sent["content"], og["content"]) >= 70
-                or fuzz.partial_ratio(sent["content"], og["content"]) >= 70
-            ):
-                # ixs.append(ix)
-                sent2og[six] = ix
-                break
-        # else:
-        #     print("No match for ", sent_as_text.index(sent))
-    # if (
-    #    sent2og[0] is None
-    #    or sent2og[-1] is None
-    #    or sent2og != list(range(sent2og[0], sent2og[-1] + 1))
-    # ):
-    #    print("BAD!")
-    #    print(
-    #        sent2og,
-    #        sent2og[0] is not None
-    #        and sent2og[-1] is not None
-    #        and list(range(sent2og[0], sent2og[-1] + 1)),
-    #    )
-    fill_missing_indexes(sent2og, 0, len(sent2og) - 1)
-
-    # for i in range(1, len(sent2og)):
-    #    if sent2og[i] is None:
-    #        if sent2og[i - 1] is not None and (i + 1 == len(sent2og) or sent2og[i + 1] is not None):
-    #            sent2og[i] = sent2og[i - 1] + 1
-
-    return sent2og
-    return [og_mod[v] if v is not None else None for v in sent2og]
-
-
-# d = all_df.apply(get_oai_mod_by_turn, axis=1)
-## d.apply(lambda l: min(l))
-# print("Num missing", d.apply(lambda l: sum([i is None for i in l])).sum())
-# print(
-#    "out of order",
-#    d.apply(
-#        lambda l: l[0] is not None and l[-1] is not None and l != list(range(l[0], l[-1] + 1))
-#    ).sum(),
-# )
-# no_dup = ~all_df["conversation"].apply(has_dup)
-d = all_df[no_dup].apply(get_oai_mod_by_turn, axis=1)
-# d.apply(lambda l: min(l))
-print("Num missing", d.apply(lambda l: sum([i is None for i in l])).sum())
-print(
-    "out of order",
-    d.apply(
-        lambda l: l[0] is not None and l[-1] is not None and l != list(range(l[0], l[-1] + 1))
-    ).sum(),
-)
-print("Non-sorted order", d.apply(lambda l: list(map(str, l)) != list(sorted(map(str, l)))).sum())
+# for df in [analysis_all, analysis_df, analysis_dfb, analysis_df3]:
+#    print_summaries(filter_df(df))
+# # Increases avg max scores and num flagged, but not the difference with my technique
+# print_summaries(filter_df(analysis_all, last_len=range(10, 200), avg_cutoff=0.0))
+# 192, 8, 190  always seem to do best (only 8,192 were in dfb), 255 worst then 0/100
+# print_summaries(filter_df(analysis_all, last_len=range(0, 200000), avg_cutoff=0.0))
+# print_summaries(filter_df(analysis_all, last_len=range(0, 200000), avg_cutoff=0.2))
+# print_summaries(filter_df(analysis_all, last_len=range(0, 200000), avg_cutoff=0.4))
+# print_summaries(filter_df(analysis_all, last_len=range(0, 200000), avg_cutoff=0.6))
+# maxing diff by hand, params don't carry over
+# print_summaries(filter_df(analysis_dfb, allow_dups=True, last_len=range(0, 500), avg_cutoff=0.35)) # 0.066
+# print_summaries(filter_df(analysis_df, allow_dups=True, last_len=range(0, 200), avg_cutoff=0.15))
+# print_summaries(filter_df(analysis_all, allow_dups=True, last_len=range(0, 200), avg_cutoff=0.15))
+# last 1 message content mod
+# print_summaries(filter_df(analysis_dfb, allow_dups=True, last_len=range(0, 500), avg_cutoff=0.1))
+# print_summaries(filter_df(analysis_all, allow_dups=True, last_len=range(0, 100), avg_cutoff=0.5))
+# last bot message content mod
+# print_summaries(filter_df(analysis_dfb, allow_dups=False, last_len=range(0, 800), avg_cutoff=0.3))
 # %%
 # function that takes data and plots histograms with ks divergence stat listed on them
 import pandas as pd
@@ -1399,11 +1372,6 @@ def prompt_lengths_vs_max_score(analysis_df):
     plt.show()
 
 
-# analysis_df = recover_csv("data_dump/analysis_df_01_24_beb23c3.csv", index_col=0)
-# analysis_df3 = pd.read_pickle("data_dump/analysis_df3_01_26_7486c8c.pkl")
-# all_df = pd.concat([analysis_df, analysis_dfb, analysis_df3, ])
-
-
 def last_prompt_lengths_vs_max_score(analysis_df):
     """
     plot length of the last message in terms of tokens for prompt and sent vs max mod score
@@ -1440,7 +1408,7 @@ def last_prompt_lengths_vs_max_score(analysis_df):
     plt.show()
 
 
-# last_prompt_lengths_vs_max_score(all_df)
+# last_prompt_lengths_vs_max_score(analysis_all)
 # last_prompt_lengths_vs_max_score(analysis_df)
 # last_prompt_lengths_vs_max_score(analysis_dfb)
 # last_prompt_lengths_vs_max_score(analysis_df3)
@@ -1743,8 +1711,78 @@ for sep in [11, 190, 255, 1000]:
     gpt4_mod_score = np.array([_chat_max_scores(m) for m in m_oai_mod])
     more_trues(gpt4_mod_flagged, gpt4_base_flagged)
     avg_larger(gpt4_mod_score, gpt4_base_score)
+
+
 # %%
 # SCRAPE
+# Don't actually need this, no conversation was that long
+def fill_missing_indexes(sent2og, start, end):
+    if start > end:
+        return
+    if sent2og[start] is not None and sent2og[end] is not None:
+        expected_range = list(range(sent2og[start], sent2og[end] + 1))
+        sent2og[start : end + 1] = expected_range
+    elif sent2og[start] is not None:
+        fill_missing_indexes(sent2og, start + 1, end)
+    else:
+        fill_missing_indexes(sent2og, start, end - 1)
+
+
+def get_oai_mod_by_turn(r):
+    og_convo = r["conversation"]
+    og_mod = r["openai_moderation"]
+    sep = r["manipulation"]["sep"]
+    sent_as_text = r["sent_convo"]
+    if sep is not None:
+        sent_as_text = [{**c, "content": c["content"].replace(sep, "")} for c in sent_as_text]
+    sent2og = [None] * len(sent_as_text)
+    p_ix = 0
+    for six, sent in enumerate(sent_as_text):
+        for ix, og in enumerate(og_convo[p_ix:], p_ix):
+            if sent["role"] == og["role"] and (
+                fuzz.ratio(sent["content"], og["content"]) >= 80
+                or fuzz.partial_ratio(sent["content"], og["content"]) >= 80
+            ):
+                # ixs.append(ix)
+                sent2og[six] = ix
+                p_ix = ix + 1
+                break
+        # else:
+        #     print("No match for ", sent_as_text.index(sent))
+    # if (
+    #    sent2og[0] is None
+    #    or sent2og[-1] is None
+    #    or sent2og != list(range(sent2og[0], sent2og[-1] + 1))
+    # ):
+    #    print("BAD!")
+    #    print(
+    #        sent2og,
+    #        sent2og[0] is not None
+    #        and sent2og[-1] is not None
+    #        and list(range(sent2og[0], sent2og[-1] + 1)),
+    #    )
+    fill_missing_indexes(sent2og, 0, len(sent2og) - 1)
+
+    # for i in range(1, len(sent2og)):
+    #    if sent2og[i] is None:
+    #        if sent2og[i - 1] is not None and (i + 1 == len(sent2og) or sent2og[i + 1] is not None):
+    #            sent2og[i] = sent2og[i - 1] + 1
+
+    return sent2og
+    return [og_mod[v] if v is not None else None for v in sent2og]
+
+
+# d = analysis_all.apply(get_oai_mod_by_turn, axis=1)
+no_dup = ~analysis_all["conversation"].apply(has_dup)
+d = analysis_all[no_dup].apply(get_oai_mod_by_turn, axis=1)
+print("Num missing", d.apply(lambda l: sum([i is None for i in l])).sum())
+print(
+    "out of order",
+    d.apply(
+        lambda l: l[0] is not None and l[-1] is not None and l != list(range(l[0], l[-1] + 1))
+    ).sum(),
+)
+print("Non-sorted order", d.apply(lambda l: list(map(str, l)) != list(sorted(map(str, l)))).sum())
 for c in categories:
     # basically random if use overall flagged y/n
     # plt.hist(chat_df[c][~chat_df["any_flagged"]], label="not flagged", alpha=0.3)
@@ -1754,6 +1792,8 @@ for c in categories:
     plt.title(c)
     plt.legend()
     plt.show()
+
+# %%
 
 
 def is_flagged(openai_moderation):
