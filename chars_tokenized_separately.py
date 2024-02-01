@@ -18,6 +18,8 @@ from sklearn.linear_model import LogisticRegression
 from concurrent.futures import ThreadPoolExecutor
 import os
 import copy
+from openai import OpenAI
+
 from src.utils import (
     between_tokens,
     get_mod,
@@ -28,6 +30,21 @@ from src.utils import (
     end_of_convo,
     take_last_tokens,
 )
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+ORD_USE_BETWEEN = [
+    0,  # most unique
+    8,  # the delete char
+    11,  # min matching  re.match('\s', chr(i)) in self_sync_ords
+    # also min(works3) i.ie not changing ss1, ss2, h1
+    190,  # max(works3)
+    192,  # min matching regex.match('[^\r\n\p{L}\p{N}]?\p{L}+' in self_sync_ords
+    # also min([i for n,i in num_sep_1_presuf if n == num_sep_1_presuf[1][0]])
+    255,  # max([i for n,i in num_sep_1_presuf if n == num_sep_1_presuf[1][0]])
+    1000,  # big and round, for randomness. not self_sync nor ascii
+]
 
 MN_TOKENS = 50
 
@@ -80,6 +97,7 @@ ds_urls = {
 #        )
 #    )
 
+# %%
 files = [
     "data_dump/lmsys-chat-1m/train-00000-of-00006-4feeb3f83346a0e9.parquet",
     "data_dump/lmsys-chat-1m/train-00001-of-00006-4030672591c2f478.parquet",
@@ -170,7 +188,7 @@ def _assert_recovery(
 
 # final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_250_34d63d4.pkl")
 # results_df2 = pd.read_pickle("data_dump/results2_01_25_34d63d4.pkl")
-# analyssi_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
+# analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
 
 
 # _assert_recovery(exp_final_chat_df, final_chat_df)
@@ -207,7 +225,20 @@ def parallel_apply(df, func, n_jobs):
 
 
 # define now categories since later versions of openai mod added columns
-categories = list(chat_df.loc[0, "openai_moderation"][0]["categories"].keys())
+# categories = list(chat_df.loc[0, "openai_moderation"][0]["categories"].keys())
+categories = [
+    "harassment",
+    "harassment/threatening",
+    "hate",
+    "hate/threatening",
+    "self-harm",
+    "self-harm/instructions",
+    "self-harm/intent",
+    "sexual",
+    "sexual/minors",
+    "violence",
+    "violence/graphic",
+]
 
 
 def _chat_is_flagged(openai_moderation):
@@ -333,9 +364,9 @@ def make_chat_df(df):
     return df
 
 
+# %%
 chat_df = make_chat_df(chat_df)
 chat_dfb = make_chat_df(chat_dfb)
-
 chat_df2 = copy.deepcopy(
     chat_df[
         parallel_apply(
@@ -521,28 +552,15 @@ final_chat_df3.to_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 # Finished preprocessing
 # %%
 
-from openai import OpenAI
+# final_chat_df = pd.read_pickle(f"data_dump/final_chat_df_{git_hash()}.pkl")
+# final_chat_dfb = pd.read_pickle(f"data_dump/final_chat_dfb_{git_hash()}.pkl")
+# final_chat_df2 = pd.read_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
+# final_chat_df3 = pd.read_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 
-client = OpenAI(
-    api_key=os.environ["OPENAI_API_KEY"],
-)
-
-final_chat_df = pd.read_pickle(f"data_dump/final_chat_df_{git_hash()}.pkl")
-final_chat_dfb = pd.read_pickle(f"data_dump/final_chat_dfb_{git_hash()}.pkl")
-final_chat_df2 = pd.read_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
-final_chat_df3 = pd.read_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
-
-ORD_USE_BETWEEN = [
-    0,  # most unique
-    8,  # the delete char
-    11,  # min matching  re.match('\s', chr(i)) in self_sync_ords
-    # also min(works3) i.ie not changing ss1, ss2, h1
-    190,  # max(works3)
-    192,  # min matching regex.match('[^\r\n\p{L}\p{N}]?\p{L}+' in self_sync_ords
-    # also min([i for n,i in num_sep_1_presuf if n == num_sep_1_presuf[1][0]])
-    255,  # max([i for n,i in num_sep_1_presuf if n == num_sep_1_presuf[1][0]])
-    1000,  # big and round, for randomness. not self_sync nor ascii
-]
+final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
+final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
+final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_d6767b3.pkl")
+final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
 
 
 # %%
@@ -696,9 +714,11 @@ def fill_out_results(df_frame, n_loops=1):
 
 # results_df = fill_out_results(results_frame)
 # results_df.to_csv(f"data_dump/results_01_24_{git_hash()}.csv")
+# results_df = recover_csv("data_dump/results_01_24_beb23c3.csv", index_col=0)
+# results_df.to_pickle(f"data_dump/results_df_01_24_{git_hash()}.pkl")
 
-results_dfb = fill_out_results(results_frameb)
-results_dfb.to_pickle(f"data_dump/resultsb_01_30_{git_hash()}.pkl")
+# results_dfb = fill_out_results(results_frameb)
+# results_dfb.to_pickle(f"data_dump/resultsb_01_30_{git_hash()}.pkl")
 
 # results_df2 = fill_out_results(results_frame2)
 # results_df2.to_pickle(f"data_dump/results2_01_25_{git_hash()}.pkl")
@@ -707,85 +727,19 @@ results_dfb.to_pickle(f"data_dump/resultsb_01_30_{git_hash()}.pkl")
 # results_df3.to_pickle(f"data_dump/results3_01_26_{git_hash()}.pkl")
 # print("Results with completion", results_df3.groupby("new_model")["new_completion"].count())
 
+# %%
+# only for results_df are emptys are loaded as nans not ''
+results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
+# results_df["new_completion"][results_df["new_completion"].isna()] = ""
 
-# %% Recover
-# WARN: results_df was slightly different sent_convo from expected
-exp_final_chat_df = recover_csv("data_dump/preprocessing_chat_df_250_34d63d4.csv")
-exp_results_df = recover_csv("data_dump/results_01_24_beb23c3.csv", index_col=0)
-exp_analysis_df = recover_csv("data_dump/analysis_df_01_24_beb23c3.csv", index_col=0)
+results_dfb = pd.read_pickle("data_dump/results_dfb_01_30_2e513e8.pkl")
+# results_df2 has 2 missing values, not sure oai wouldn't create completions for those
+results_df2 = pd.read_pickle("data_dump/_bad_results2_01_25_34d63d4.pkl")
+results_df3 = pd.read_pickle("data_dump/results_df3_01_26_7486c8c.pkl")
 
-# Not really going to use results2 data, didn't test on gpt411 but 8 wo were above 0.3
-# and 2 rows got type errors with no manipulation for both models
-# these 2 na rows in oai_mod and completion otherwise break the analysis_df
-exp_final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_250_34d63d4.pkl")
-exp_results_df2 = pd.read_pickle("data_dump/results2_01_25_34d63d4.pkl")
-exp_analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
 
-exp_final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
-exp_results_df3 = pd.read_pickle("data_dump/results3_01_26_7486c8c.pkl")
-exp_analysis_df3 = pd.read_pickle("data_dump/analysis_df3_01_26_7486c8c.pkl")
-
-assert final_chat_df[exp_final_chat_df.columns].equals(exp_final_chat_df)
-print(
-    exp_final_chat_df.equals(final_chat_df),  # false from column order
-    # exp_results_df.equals(results_df),
-    # exp_analysis_df.equals(analysis_df),
-    exp_final_chat_df2.equals(final_chat_df2),
-    # exp_results_df2.equals(results_df2), # results different from sent_convo, seems encoding changed(?!)
-    # exp_analysis_df2.equals(analyssi_df2),
-)
-
-# results slightly different, mostly for None's (!)
-# print(results_frame2[results_df2.columns].compare(results_df2))
-print(
-    np.sum(exp_results_df["sent_convo"].apply(str) == _mrf(final_chat_df)["sent_convo"].apply(str))
-)  # 1834
-print(
-    np.sum(
-        exp_results_df2["sent_convo"].apply(str) == _mrf(final_chat_df2)["sent_convo"].apply(str)
-    )
-)  # 1991
-print(
-    Counter(
-        results_frame2[
-            results_frame2["sent_convo"].apply(str) != exp_results_df2["sent_convo"].apply(str)
-        ]["manipulation"].map(lambda d: d["sep"])
-    ),
-    Counter(
-        results_frame[
-            results_frame["sent_convo"].apply(str) != exp_results_df["sent_convo"].apply(str)
-        ]["manipulation"].map(lambda d: d["sep"])
-    ),
-)
-print(
-    exp_final_chat_df2["conversation"].apply(str).nunique(),
-    exp_results_df2["sent_convo"].apply(str).nunique(),
-    exp_final_chat_df["conversation"].apply(str).nunique(),
-    exp_results_df["sent_convo"].apply(str).nunique(),
-)
-# final_chat_df had 3 dups, 247*8=1976 so that checks
-# a = recover_csv("data_dump/preprocessing_chat_df_250.csv")
-# # weirdness around utf-8, encoding/decoding with replace
-# df = final_chat_df[a.columns].compare(a)
-# def safe_encode(x):
-#    if isinstance(x, str) or hasattr(x, "encode"):
-#        return x.encode("utf-8", "ignore").decode("utf-8", "ignore")
-#    return x
-# df = final_chat_df[a.columns].compare(a)
-# for column in df.columns:
-#    df[column] = df[column].apply(safe_encode)
-# print(df[~df["conversation"]["self"].isna()]["conversation"])
-# a = recover_csv("data_dump/results_01_23.csv", index_col=0)
-# Not quite right
-# a2 = recover_csv("data_dump/results2_01_25_34d63d4.csv", index_col=0)
-# c = [c for c in a2.columns if c != "sent_convo"]
-# results_df2[c].compare(a2[c])
-
-# results_df = recover_csv("data_dump/results_01_23.csv", index_col=0)
-# analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
+# %%
 # %% # analysis pre-processing
-
-
 def explode_moderation_results(df, prefix):
     """
     Takes a set of result rows and turns into Y value columns
@@ -846,8 +800,8 @@ def make_analysis_df(results_df, final_chat_df):
 # analysis_df = make_analysis_df(results_df[~results_df["new_oai_mod"].isna()], final_chat_df)
 # analysis_df.to_pickle(f"data_dump/analysis_df_01_30_{git_hash()}.pkl")
 
-analysis_dfb = make_analysis_df(results_dfb, final_chat_dfb)
-analysis_dfb.to_pickle(f"data_dump/analysis_dfb_01_30_{git_hash()}.pkl")
+# analysis_dfb = make_analysis_df(results_dfb, final_chat_dfb)
+# analysis_dfb.to_pickle(f"data_dump/analysis_dfb_01_30_{git_hash()}.pkl")
 
 # analysis_df2 = make_analysis_df(results_df2[~results_df2["new_oai_mod"].isna()], final_chat_df2)
 # analysis_df2.to_pickle(f"data_dump/analysis_df2_01_25_{git_hash()}.pkl")
@@ -856,6 +810,22 @@ analysis_dfb.to_pickle(f"data_dump/analysis_dfb_01_30_{git_hash()}.pkl")
 # analysis_df3.to_pickle(f"data_dump/analysis_df3_01_26_{git_hash()}.pkl")
 
 # analysis should concat both 1 and 3?
+# %%
+final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
+final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
+final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_d6767b3.pkl")
+final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
+
+results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
+results_dfb = pd.read_pickle("data_dump/results_dfb_01_30_2e513e8.pkl")
+# results_df2 has 2 missing values, not sure oai wouldn't create completions for those
+results_df2 = pd.read_pickle("data_dump/_bad_results2_01_25_34d63d4.pkl")
+results_df3 = pd.read_pickle("data_dump/results_df3_01_26_7486c8c.pkl")
+
+analysis_df = pd.read_pickle("data_dump/analysis_df_01_30_3227533.pkl")
+analysis_dfb = pd.read_pickle("data_dump/analysis_dfb_01_30_2e513e8.pkl")
+analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
+analysis_df3 = pd.read_pickle("data_dump/analysis_df3_01_26_7486c8c.pkl")
 # %%
 # scrape analysis
 from scipy import stats
