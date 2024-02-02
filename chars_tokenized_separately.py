@@ -10,6 +10,8 @@ from itertools import takewhile, accumulate
 import time
 import ast
 from collections import Counter
+import glob
+import re
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -20,6 +22,7 @@ import os
 import copy
 from openai import OpenAI
 
+from src.make_prompts import *
 from src.utils import (
     between_tokens,
     get_mod,
@@ -48,8 +51,8 @@ ORD_USE_BETWEEN = [
 
 MN_TOKENS = 50
 
-# HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
-HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
+HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
+# HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
 pd.set_option("display.max_colwidth", 1000)
 
 
@@ -65,23 +68,30 @@ ds_urls = {
     "lmsys-chat-1m": [
         "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/resolve/main/data/train-00000-of-00006-4feeb3f83346a0e9.parquet",
         "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/resolve/main/data/train-00001-of-00006-4030672591c2f478.parquet",
-        # chat_df4
+        # chat_dfb
         "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/blob/main/data/train-00002-of-00006-1779b7cec9462180.parquet",
         "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/blob/main/data/train-00003-of-00006-2fa862bfed56af1f.parquet",
+        # chat_dfc,
+        "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/blob/main/data/train-00004-of-00006-18f4bdd50c103e71.parquet",
+        "https://huggingface.co/datasets/lmsys/lmsys-chat-1m/blob/main/data/train-00005-of-00006-fe1acc5d10a9f0e2.parquet",
     ],
-    "4chanpol-openaimod": [
-        "https://huggingface.co/datasets/kjj0/4chanpol-openaimod/blob/main/data/train-00000-of-00048-6b6dfb39b513b835.parquet",
-        "https://huggingface.co/datasets/kjj0/4chanpol-openaimod/blob/main/data/train-00001-of-00048-d041203d14b9a63b.parquet",
-    ],
+    # "4chanpol-openaimod": [
+    #    "https://huggingface.co/datasets/kjj0/4chanpol-openaimod/blob/main/data/train-00000-of-00048-6b6dfb39b513b835.parquet",
+    #    "https://huggingface.co/datasets/kjj0/4chanpol-openaimod/blob/main/data/train-00001-of-00048-d041203d14b9a63b.parquet",
+    # ],
 }
 
+
 # def download_file(url, local_filename, token):
-#    headers = {"Authorization": f"Bearer {token}"}
-#    with requests.get(url, headers=headers, stream=True) as r:
-#        r.raise_for_status()
-#        with open(local_filename, "wb") as f:
-#            for chunk in r.iter_content(chunk_size=8192):
-#                f.write(chunk)
+#    if not os.path.exists(local_filename):
+#        headers = {"Authorization": f"Bearer {token}"}
+#        with requests.get(url, headers=headers, stream=True) as r:
+#            r.raise_for_status()
+#            with open(local_filename, "wb") as f:
+#                for chunk in r.iter_content(chunk_size=8192):
+#                    f.write(chunk)
+#    else:
+#        print(f"Skipping {local_filename} {url}")
 #    return local_filename
 #
 #
@@ -109,9 +119,12 @@ filesb = [
     "data_dump/lmsys-chat-1m/train-00002-of-00006-1779b7cec9462180.parquet",
     "data_dump/lmsys-chat-1m/train-00003-of-00006-2fa862bfed56af1f.parquet",
 ]
-chat_dfb = pd.concat(
-    [pd.read_parquet(f) for f in filesb if "lmsys-chat-1m" in f], ignore_index=True
-)
+chat_dfb = pd.concat([pd.read_parquet(f) for f in filesb], ignore_index=True)
+filesc = [
+    "data_dump/lmsys-chat-1m/train-00004-of-00006-18f4bdd50c103e71.parquet",
+    "data_dump/lmsys-chat-1m/train-00005-of-00006-fe1acc5d10a9f0e2.parquet",
+]
+chat_dfc = pd.concat([pd.read_parquet(f) for f in filesc], ignore_index=True)
 # completion_df = pd.concat(
 #    [pd.read_parquet(f) for f in files if "4chanpol-openaimod" in f], ignore_index=True
 # )
@@ -363,17 +376,23 @@ def make_chat_df(df):
 
 
 # %%
+def _filter(df):
+    return copy.deepcopy(
+        df[
+            parallel_apply(
+                df["conversation"],
+                lambda m: prefilter_chats(m, mn_tokens=750, mx_tokens=2500),
+                n_jobs=8,
+            )
+        ]
+    )
+
+
 chat_df = make_chat_df(chat_df)
+chat_df2 = _filter(chat_df)
 chat_dfb = make_chat_df(chat_dfb)
-chat_df2 = copy.deepcopy(
-    chat_df[
-        parallel_apply(
-            chat_df["conversation"],
-            lambda m: prefilter_chats(m, mn_tokens=750, mx_tokens=2500),
-            n_jobs=8,
-        )
-    ]
-)
+chat_dfc = _filter(make_chat_df(chat_dfc))
+
 chat_df2 = chat_df2[~chat_df2["conversation_id"].isin(analysis_df["conversation_id"])]
 # chat_df3 is a different preprocessing of chat_df2
 chat_df3 = copy.deepcopy(chat_df2)
@@ -458,27 +477,36 @@ def make_user_last_speaker(convo):
     assert False, "No user in convo"
 
 
+def _make_selection(chat_dfb):
+    final_chat_dfb = select_rows(  # Optimization
+        chat_dfb, n_per_cat=N_PER_CATEGORY * 5, test_columns=test_columns, _first_chat_df_hack=True
+    )
+    final_chat_dfb["conversation"] = final_chat_dfb["conversation"].apply(
+        lambda c: end_of_convo(c, max_tokens=8196 // 2 - 500 - 50)
+    )
+    final_chat_dfb = final_chat_dfb[
+        parallel_apply(
+            final_chat_dfb["conversation"],
+            lambda m: prefilter_chats(m, mn_tokens=750, mx_tokens=2500),
+            n_jobs=8,
+        )
+    ]
+    final_chat_dfb = select_rows(
+        final_chat_dfb,
+        n_per_cat=N_PER_CATEGORY,
+        test_columns=test_columns,
+        _first_chat_df_hack=True,
+    )
+    return final_chat_dfb
+
+
 # Still slighty different from original since didn't cut number of convos yet
 final_chat_df = select_rows(
     chat_df, n_per_cat=N_PER_CATEGORY, test_columns=test_columns, _first_chat_df_hack=True
 )
 
-final_chat_dfb = select_rows(  # Optimization
-    chat_dfb, n_per_cat=N_PER_CATEGORY * 5, test_columns=test_columns, _first_chat_df_hack=True
-)
-final_chat_dfb["conversation"] = final_chat_dfb["conversation"].apply(
-    lambda c: end_of_convo(c, max_tokens=8196 // 2 - 500 - 50)
-)
-final_chat_dfb = final_chat_dfb[
-    parallel_apply(
-        final_chat_dfb["conversation"],
-        lambda m: prefilter_chats(m, mn_tokens=750, mx_tokens=2500),
-        n_jobs=8,
-    )
-]
-final_chat_dfb = select_rows(
-    final_chat_dfb, n_per_cat=N_PER_CATEGORY, test_columns=test_columns, _first_chat_df_hack=True
-)
+final_chat_dfb = _make_selection(chat_dfb)
+final_chat_dfc = _make_selection(chat_dfc)
 
 final_chat_df2 = select_rows(
     chat_df2,
@@ -535,25 +563,28 @@ def final_chat_df_summaries(final_chat_df, chat_df):
 
 final_chat_df_summaries(final_chat_df, chat_df)
 final_chat_df_summaries(final_chat_dfb, chat_dfb)
+final_chat_df_summaries(final_chat_dfc, chat_dfc)
 final_chat_df_summaries(final_chat_df2, chat_df2)
 final_chat_df_summaries(final_chat_df3, chat_df3)
 
 final_chat_df.to_pickle(f"data_dump/final_chat_df_{git_hash()}.pkl")
 final_chat_dfb.to_pickle(f"data_dump/final_chat_dfb_{git_hash()}.pkl")
+final_chat_dfc.to_pickle(f"data_dump/final_chat_dfc_{git_hash()}.pkl")
 final_chat_df2.to_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
 final_chat_df3.to_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 
 # Finished preprocessing
 final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
 final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
+final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_d45647f.pkl")
 final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_d6767b3.pkl")
 final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
 
 
 # %%
 # rows to make
-def make_results_frame(final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="gpt-4-0613"):
-    if model not in ("gpt-4-1106-preview", "gpt-4-0613"):
+def make_results_frame(final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="gpt-4-0613", make_new_convo=None):
+    if model not in ("gpt-4-0125-preview", "gpt-4-1106-preview", "gpt-4-0613"):
         print(f"WARN: model {model} not expected")
     new_dfs = []
     for ord_val in ord_vals:
@@ -562,7 +593,7 @@ def make_results_frame(final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="
         _r_df["new_oai_mod"] = pd.NA
         _r_df["new_model"] = model
         if ord_val is None:
-            _r_df["sent_convo"] = final_chat_df["conversation"]
+            _r_df["sent_convo"] = final_chat_df["conversation"].apply(list)
             _r_df["manipulation"] = [{"kind": None, "sep": None}] * len(_r_df["sent_convo"])
             sep = None
         else:
@@ -571,22 +602,40 @@ def make_results_frame(final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="
             _r_df["sent_convo"] = final_chat_df["conversation"].apply(
                 lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
             )
+            if make_new_convo is not None:
+                _r_df['sent_convo'] = _r_df.apply(make_new_convo,a)
             _r_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(_r_df["sent_convo"])
         new_dfs += [_r_df]
     return pd.concat(new_dfs)
 
 
-def _mrf(final_chat_df):
+def _mrf(final_chat_df, ord_use=ORD_USE_BETWEEN):
     o = pd.concat([
-        make_results_frame(final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="gpt-4-0613"),
+        make_results_frame(final_chat_df, ord_vals=ord_use + [None], model="gpt-4-0613"),
         make_results_frame(final_chat_df, ord_vals=[None], model="gpt-4-1106-preview"),
     ])
     print(sum(o["new_oai_mod"].isna()), len(o))
     return o
 
 
+def prepend_prompt(prompt_fn, sep, convo, role="system"):
+    prompt = prompt_fn(sep)
+    return [{"content": prompt, "role": role}] + convo
+
+
+results_framec = make_results_frame(final_chat_dfc, ord_vals=[8, 192, None], make_new_convo=lambda r: prepend_prompt(
+        make_prompt13,
+        r["manipulation"]["sep"],
+        r["sent_convo"],
+        role="system",
+    ))
+print(results_framec.apply(lambda r: r['sent_convo'],axis=1).apply(type).value_counts())
+print(results_framec["sent_convo"].apply(lambda l: l[0]).value_counts())
+
+# %%
 results_frame = _mrf(final_chat_df)
 results_frameb = make_results_frame(final_chat_dfb, ord_vals=[8, 192, None])
+results_framec = make_results_frame(final_chat_dfc, ord_vals=[8, 192, None])
 results_frame2 = _mrf(final_chat_df2)
 results_frame3 = _mrf(final_chat_df3)
 
@@ -1062,11 +1111,6 @@ def make_dfs_to_retest(analysis_to_retest):
     return f_chat_df_retest, pd.concat([r_df_retest, *r_df_keep_defaults], axis=0)
 
 
-def prepend_prompt(prompt_fn, sep, convo, role="system"):
-    prompt = prompt_fn(sep)
-    return [{"content": prompt, "role": role}] + convo
-
-
 def test_prompts(analysis_df, make_new_convo, name, model_only=None):
     f_df_retest, r_df_retest = make_dfs_to_retest(analysis_df)
     f_df_retest.to_pickle(f"data_dump/test_dfs/f_df{name}_{git_hash()}.pkl")
@@ -1129,10 +1173,6 @@ def _q_sum(r):
         df[r["manipulation"] != {"kind": None, "sep": None}].agg(["mean", "sem"]),
     )
 
-
-import glob
-import re
-from src.make_prompts import *
 
 if False:
     a_df_retest_dict = {}
