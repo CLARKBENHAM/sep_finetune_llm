@@ -1062,21 +1062,19 @@ def make_dfs_to_retest(analysis_to_retest):
     return f_chat_df_retest, pd.concat([r_df_retest, *r_df_keep_defaults], axis=0)
 
 
-def insert_prompt(prompt_fn, sep, convo, role="system"):
+def prepend_prompt(prompt_fn, sep, convo, role="system"):
     prompt = prompt_fn(sep)
     return [{"content": prompt, "role": role}] + convo
 
 
-def test_prompts(analysis_df, prompt_fn, name, model_only=None):
+def test_prompts(analysis_df, make_new_convo, name, model_only=None):
     f_df_retest, r_df_retest = make_dfs_to_retest(analysis_df)
     f_df_retest.to_pickle(f"data_dump/test_dfs/f_df{name}_{git_hash()}.pkl")
 
     if model_only is not None:
         r_df_retest = r_df_retest[r_df_retest["new_model"] == model_only]
     ix = r_df_retest["manipulation"] != {"kind": None, "sep": None}
-    r_df_retest["sent_convo"][ix] = r_df_retest[ix].apply(
-        lambda r: insert_prompt(prompt_fn, r["manipulation"]["sep"], r["sent_convo"]), axis=1
-    )
+    r_df_retest["sent_convo"][ix] = r_df_retest[ix].apply(make_new_convo, axis=1)
 
     r_df_retest = fill_out_results(r_df_retest)
     r_df_retest.to_pickle(f"data_dump/test_dfs/r_df{name}_{git_hash()}.pkl")
@@ -1086,7 +1084,9 @@ def test_prompts(analysis_df, prompt_fn, name, model_only=None):
     return a_df_retest
 
 
-def make_test_prompts(a_df, score_diff_cutoff, prompt_fn, name, seps_only=None, model_only=None):
+def make_test_prompts(
+    a_df, score_diff_cutoff, make_new_convo, name, seps_only=None, model_only=None
+):
     if seps_only is not None:
         seps_only = [o if isinstance(o, str) or o is None else chr(o) for o in seps_only]
         use_ix = a_df["manipulation"].apply(lambda m: m["sep"] in seps_only)
@@ -1101,7 +1101,9 @@ def make_test_prompts(a_df, score_diff_cutoff, prompt_fn, name, seps_only=None, 
     use_ix &= _failed_ix.reindex(a_df.index, method="ffill")
     print("new analysis rows", use_ix.sum())
 
-    a_df_retest = test_prompts(a_df[use_ix], prompt_fn=prompt_fn, name=name, model_only=model_only)
+    a_df_retest = test_prompts(
+        a_df[use_ix], make_new_convo=make_new_convo, name=name, model_only=model_only
+    )
     print_summaries(a_df_retest)
     a_df_updated = copy.deepcopy(a_df)
     print(a_df_retest.index, a_df[use_ix].index)
@@ -1134,15 +1136,17 @@ from src.make_prompts import *
 
 if False:
     a_df_retest_dict = {}
-    for i in range(1,17):
-       print(i)
-       _, a_df_retest_dict[i] = make_test_prompts(
-           analysis_dfb,
-           prompt_fn=eval(f"make_system_prompt{i}"),
-           name=f"b_d02_system_prompt{i}",
-           score_diff_cutoff=0.2,
-           seps_only=[8, 192],
-       )
+    for i in range(1, 17):
+        print(i)
+        _, a_df_retest_dict[i] = make_test_prompts(
+            analysis_dfb,
+            make_new_convo=lambda r: prepend_prompt(
+                eval(f"make_prompt{i}"), r["manipulation"]["sep"], r["sent_convo"]
+            ),
+            name=f"b_d02_system_prompt{i}",
+            score_diff_cutoff=0.2,
+            seps_only=[8, 192],
+        )
     results = []
     dfs = []
     for r in glob.glob("data_dump/test_dfs/r_dfb_d02*"):
@@ -1158,7 +1162,9 @@ if False:
 
     d = pd.concat(dfs)
     more_trues(
-        d[d["manipulation"].apply(lambda i: i["sep"] == chr(8))]["new_oai_mod"].apply(_chat_max_scores),
+        d[d["manipulation"].apply(lambda i: i["sep"] == chr(8))]["new_oai_mod"].apply(
+            _chat_max_scores
+        ),
         d[d["manipulation"].apply(lambda i: i["sep"] == chr(192))]["new_oai_mod"].apply(
             _chat_max_scores
         ),
