@@ -1136,21 +1136,25 @@ from src.make_prompts import *
 
 if False:
     a_df_retest_dict = {}
-    for i in range(1, 17):
+    # for i in range(1, 17): # system
+    for i in [2, 13, 16]:  # user
         print(i)
         _, a_df_retest_dict[i] = make_test_prompts(
             analysis_dfb,
             make_new_convo=lambda r: prepend_prompt(
-                eval(f"make_prompt{i}"), r["manipulation"]["sep"], r["sent_convo"]
+                eval(f"make_prompt{i}"),
+                r["manipulation"]["sep"],
+                r["sent_convo"],
+                role="user",
             ),
-            name=f"b_d02_system_prompt{i}",
+            name=f"b_d02_user_prompt{i}",
             score_diff_cutoff=0.2,
             seps_only=[8, 192],
         )
     results = []
     dfs = []
-    for r in glob.glob("data_dump/test_dfs/r_dfb_d02*"):
-        match = re.search(r"system_prompt(.*)_", r)
+    for r in glob.glob("data_dump/test_dfs/r_dfb_d02_user*"):
+        match = re.search(r"_prompt(.*)_", r)
         i = match.group(1) if match else ""
         if i == "":
             print(r)
@@ -1179,38 +1183,11 @@ if False:
         print(i, "num_na: ", num_na)
         print(q_sum[1]["max_scores"])
         print(q_sum[0]["max_scores"]["mean"])
-    # prompts pilot,13,2, 16, best, then 5,12,15 then 10,8,1,14,9 mid , 11,4,3,6,7 worst
+    # system_prompts pilot,13,2, 16, best, then 5,12,15 then 10,8,1,14,9 mid , 11,4,3,6,7 worst
     # so examples bad, make it shorter?
-# %%
-# this works on gpt4-11-06 better than chance
-df_gpt11 = copy.deepcopy(results_dfb_system1[["sent_convo", "manipulation"]][ix])
-df_gpt11["new_model"] = "gpt-4-1106-preview"
-df_gpt11["new_completion"] = None
-df_gpt11["new_oai_mod"] = None
-df_gpt11 = fill_out_results(df_gpt11)
-print(df_gpt11["new_oai_mod"].apply(_chat_max_scores).agg(["mean", "sem"]))
-print(df_gpt11["new_oai_mod"].apply(_chat_is_flagged).agg(["mean", "sem"]))
-# %%
+    # user prompts: 15 pts worse: 16,13,2 at 37,29,20 % flagged
 
-# _failed_ix = analysis_df["new_max_scores"] < analysis_df["gpt40613_max_scores"] - 0.1
-# analysis_dfb_where_failed = copy.deepcopy(analysis_df[_failed_ix])
-#
-# final_chat_dfb_system2, results_dfb_system2 = make_results_dfs_to_retest(analysis_dfb_where_failed)
-# final_chat_dfb_system2.to_pickle(f"data_dump/fchat_df_system1{git_hash()}.pkl")
-# ix = results_dfb_system2["manipulation"] != {"kind": None, "sep": None}
-# results_dfb_system1["sent_convo"][ix] = results_dfb_system1[ix].apply(
-#    lambda r: insert_prompt(make_system_prompt1, r["manipulation"]["sep"], r["sent_convo"]), axis=1
-# )
-# results_dfb_system2 = fill_out_results(results_dfb_system2)
-# results_dfb_system2.to_pickle(f"data_dump/r_df_system2{git_hash()}.pkl")
-# analysis_dfb_system2 = make_analysis_df(results_dfb_system2, final_chat_dfb_system2)
-# analysis_dfb_system2.to_pickle(f"data_dump/a_df_system2{git_hash()}.pkl")
-#
-# print_summaries(analysis_dfb_system2)
-# a_df_2 = copy.deepcopy(analysis_df)
-# a_df_2[_failed_ix] = analysis_dfb_system2
-# print_summaries(a_df_2)
-
+    # this works on gpt4-11-06 better than chance at 10ish% but no benifit for gpt01
 # %%
 # Filter convos for where expect a continuation to be bad
 from fuzzywuzzy import fuzz, process
