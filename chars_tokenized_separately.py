@@ -546,13 +546,6 @@ final_chat_df2.to_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
 final_chat_df3.to_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 
 # Finished preprocessing
-# %%
-
-# final_chat_df = pd.read_pickle(f"data_dump/final_chat_df_{git_hash()}.pkl")
-# final_chat_dfb = pd.read_pickle(f"data_dump/final_chat_dfb_{git_hash()}.pkl")
-# final_chat_df2 = pd.read_pickle(f"data_dump/final_chat_df2_{git_hash()}.pkl")
-# final_chat_df3 = pd.read_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
-
 final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
 final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
 final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_d6767b3.pkl")
@@ -725,33 +718,60 @@ def fill_out_results(df_frame, n_loops=1):
 # print("Results with completion", results_df3.groupby("new_model")["new_completion"].count())
 # %%
 # %% System tests
-def make_results_dfs_to_retest(analysis_to_retest, m="gpt40613"):
-    """take an analysis you want to retest and return 2 df:
-    1. a results frame to run again
-    2. the results frame for the default no convo change
-    """
-    f_chat_df_retest = copy.deepcopy(analysis_to_retest[final_chat_dfb.columns])
+chat_df_cols = final_chat_df.columns
+result_df_cols = results_dfb.columns
+prefix2model = {"gpt40613": "gpt-4-0613", "gpt41106preview": "gpt-4-1106-preview"}
 
-    r_df_retest = copy.deepcopy(analysis_to_retest[results_dfb.columns])
+
+def make_results_dfs_to_retest(analysis_to_retest):
+    """take an analysis you want to retest and return 2 df:
+    final_chat_df, result_frame
+    the default comparisons are kept unchanged in result_frame
+    only the new_completion and new_oai_mod are reset where manipulation happened
+    """
+    f_chat_df_retest = copy.deepcopy(analysis_to_retest[chat_df_cols])
+    assert f_chat_df_retest.index.nunique() == f_chat_df_retest['conversation_id'].nunique()
+    # not sure why grouping by conversation_id doesn't preserve index order
+    #f_chat_df_retest = f_chat_df_retest.groupby("conversation_id").first().reset_index()
+    f_chat_df_retest = f_chat_df_retest.groupby(f_chat_df_retest.index).first().reset_index()
+
+    r_df_retest = copy.deepcopy(analysis_to_retest[list(result_df_cols) + ['conversation_id']])
+    #r_df_retest = r_df_retest.sort_values('conversation_id')
+    r_df_retest = r_df_retest.iloc[analysis_to_retest['conversation_id'].apply(lambda x: r_df_retest['conversation_id'].tolist().index(x)).argsort()]
+    del r_df_retest['conversation_id']
     r_df_retest["new_completion"] = None
     r_df_retest["new_oai_mod"] = None
 
-    r_df_keep_default = copy.deepcopy(
-        analysis_to_retest[["new_model", "conversation", f"{m}_oai_mod", f"{m}_completion"]].rename(
-            columns={
-                "conversation": "sent_convo",
-                f"{m}_oai_mod": "new_oai_mod",
-                f"{m}_completion": "new_completion",
-            }
+    r_df_keep_defaults = []
+    prefixes = [
+        c.replace("_oai_mod", "") for c in analysis_to_retest if "_oai_mod" in c and c[:3] != "new"
+    ]
+    for model_col_prefix in np.unique(prefixes):
+        rename_d = {
+            "conversation": "sent_convo",
+            f"{model_col_prefix}_oai_mod": "new_oai_mod",
+            f"{model_col_prefix}_completion": "new_completion",
+        }
+        if len(set(rename_d.keys()) & set(analysis_to_retest.columns)) != 3:
+            print("WARN: {model} default completions not included")
+            continue
+        r_df_keep_default = copy.deepcopy(
+            analysis_to_retest
+            .groupby(analysis_to_retest.index)
+            .first()
+            .reset_index()
+            [list(rename_d.keys())]
+            .rename(columns=rename_d)
         )
-    )
-    u_m = r_df_keep_default["new_model"].apply(lambda l: l.replace("-", "")).unique()
-    assert u_m == [m], f"Multiple models {u_m}"
-    r_df_keep_default["manipulation"] = [{"kind": None, "sep": None}] * len(
-        r_df_keep_default["sent_convo"]
-    )
-    assert r_df_keep_default["new_oai_mod"].isna().sum() == 0, "Default has nulls"
-    return f_chat_df_retest, pd.concat([r_df_retest, r_df_keep_default], axis=0)
+
+        r_df_keep_default["new_model"] = prefix2model[model_col_prefix]
+        r_df_keep_default["manipulation"] = [{"kind": None, "sep": None}] * len(
+            r_df_keep_default["sent_convo"]
+        )
+        assert r_df_keep_default["new_oai_mod"].isna().sum() == 0, "Default has nulls"
+
+        r_df_keep_defaults.append(r_df_keep_default)
+    return f_chat_df_retest, pd.concat([r_df_retest, *r_df_keep_defaults], axis=0)
 
 
 def make_system_prompt1(chr_sep):
@@ -792,23 +812,112 @@ def insert_prompt(prompt_fn, sep, convo, role="system"):
     return [{"content": prompt, "role": role}] + convo
 
 
-_failed_ix = analysis_dfb["new_max_scores"] < analysis_dfb["gpt40613_max_scores"] - 0.3
-analysis_dfb_where_failed = copy.deepcopy(analysis_dfb[_failed_ix])
-final_chat_dfb_system1, results_dfb_system1 = make_results_dfs_to_retest(analysis_dfb_where_failed)
-final_chat_dfb_system1.to_pickle(f"data_dump/fchat_df_system1{git_hash()}.pkl")
-ix = results_dfb_system1["manipulation"] != {"kind": None, "sep": None}
-results_dfb_system1["sent_convo"][ix] = results_dfb_system1[ix].apply(
-    lambda r: insert_prompt(make_system_prompt1, r["manipulation"]["sep"], r["sent_convo"]), axis=1
-)
-results_dfb_system1 = fill_out_results(results_dfb_system1)
-results_dfb_system1.to_pickle(f"data_dump/r_df_system1{git_hash()}.pkl")
+# analysis_dfb, first test got 40%
+def test_prompts(analysis_df, prompt_fn, name, score_diff_cutoff, model_only=None):
+    if name[-1] != "_":
+        name += "_"
+    _failed_ix = (
+        analysis_df["new_max_scores"] < analysis_df["gpt40613_max_scores"] - score_diff_cutoff
+    )
+    analysis_dfb_where_failed = copy.deepcopy(analysis_df[_failed_ix])
+    final_chat_dfb_system1, results_dfb_system1 = make_results_dfs_to_retest(
+        analysis_dfb_where_failed
+    )
+    final_chat_dfb_system1.to_pickle(f"data_dump/test_dfs/fchat_df{name}{git_hash()}.pkl")
+    if model_only is not None:
+        results_dfb_system1 = results_dfb_system1[results_dfb_system1["new_model"] == model_only]
+    ix = results_dfb_system1["manipulation"] != {"kind": None, "sep": None}
+    results_dfb_system1["sent_convo"][ix] = results_dfb_system1[ix].apply(
+        lambda r: insert_prompt(prompt_fn, r["manipulation"]["sep"], r["sent_convo"]), axis=1
+    )
+    results_dfb_system1 = fill_out_results(results_dfb_system1)
+    results_dfb_system1.to_pickle(f"data_dump/test_dfs/r_df{name}{git_hash()}.pkl")
+    analysis_dfb_system1 = make_analysis_df(results_dfb_system1, final_chat_dfb_system1)
+    analysis_dfb_system1.to_pickle(f"data_dump/test_dfs/a_df{name}{git_hash()}.pkl")
+    print_summaries(analysis_dfb_system1)
+    a_dfb_2 = copy.deepcopy(analysis_df)
+    a_dfb_2[_failed_ix] = analysis_dfb_system1
+    print_summaries(a_dfb_2)
+
+def _map_to_chunk(r):
+    o = r['manipulation']['sep']
+    return f"{o}_{r['new_model']}"
+
+def fix_new_results_ix(r, results_df):
+    results_df_chunks = results_df.apply(_map_to_chunk, axis=1)
+    results_df2ix = {v: i for i, v in enumerate(results_df_chunks.drop_duplicates(keep='first'))}
+    def _map_to_ordered_chunk(r):
+        return results_df2ix[_map_to_chunk(r)]
+    return pd.concat(
+        [chunk for _, chunk in sorted(r.groupby(r.apply(_map_to_ordered_chunk,axis=1)), key=lambda x: x[0])]
+    )
+
+
+# test_prompts(
+#    analysis_dfb, prompt_fn=make_system_prompt1, name="b_d03_system_prompt1_", score_diff_cutoff=0.3
+# )
+
+#
+
+for a, rdf in [(analysis_dfb,results_dfb), (analysis_df,results_df), (analysis_df2,results_df2), (analysis_df3, results_df3)]:
+    print(rdf[rdf['new_completion'].isna()].index,
+        a[a['gpt40613_harassment'].isna()].index,
+          )
+    bad = rdf['new_completion'].isna()
+    bad_ix = rdf[bad].index
+    a=a[~a.index.isin(bad_ix)]
+    rdf = rdf[~bad]
+    print(a.isna().sum().sort_values())
+    print()
+    f, r = make_results_dfs_to_retest(a)
+    r = fix_new_results_ix(r, rdf)
+    assert np.all([np.all(rdf['sent_convo'].loc[i].iloc[:len(a.loc[0])] == a['sent_convo'].loc[i].iloc[:len(a.loc[0])]) for i in range(250) if i not in bad_ix])
+    assert np.all([np.all(rdf['sent_convo'].loc[i].iloc[:len(a.loc[0])] == r['sent_convo'].loc[i].iloc[:len(a.loc[0])]) for i in range(250) if i not in bad_ix])
+#%%
+for c in ['sent_convo']: # results_df.columns:
+    if c in ('new_oai_mod', 'new_completion'):
+        continue
+    #for i in range(250):
+    #    if np.sum(r[c][i].apply(str) == results_df[c][i].apply(str)) !=9:
+    #        print(c, i)
+    try:
+        d = r[c].apply(str).compare(results_df[c].apply(str))
+        if len(d):
+            print(c, np.mean(d['self'].apply(len)==d['other'].apply(len)))
+            print(np.argwhere(d['self'].apply(len)!=d['other'].apply(len)))
+            print((d['self'].apply(len)-d['other'].apply(len)).describe())
+            print(c, np.mean(d['self'].apply(num_tokens_from_string)==d['other'].apply(num_tokens_from_string)))
+    except Exception as e:
+        print(c, e)
 # %%
-analysis_dfb_system1 = make_analysis_df(results_dfb_system1, final_chat_dfb_system1)
-analysis_dfb_system1.to_pickle(f"data_dump/a_df_system1{git_hash()}.pkl")
-print_summaries(analysis_dfb_system1)
-a_dfb_2 = copy.deepcopy(analysis_dfb)
-a_dfb_2[_failed_ix] = analysis_dfb_system1
-print_summaries(a_dfb_2)
+# this works on gpt4-11-06 better than chance
+df_gpt11 = copy.deepcopy(results_dfb_system1[["sent_convo", "manipulation"]][ix])
+df_gpt11["new_model"] = "gpt-4-1106-preview"
+df_gpt11["new_completion"] = None
+df_gpt11["new_oai_mod"] = None
+df_gpt11 = fill_out_results(df_gpt11)
+print(df_gpt11["new_oai_mod"].apply(_chat_max_scores).agg(["mean", "sem"]))
+print(df_gpt11["new_oai_mod"].apply(_chat_is_flagged).agg(["mean", "sem"]))
+# %%
+
+# _failed_ix = analysis_df["new_max_scores"] < analysis_df["gpt40613_max_scores"] - 0.1
+# analysis_dfb_where_failed = copy.deepcopy(analysis_df[_failed_ix])
+#
+# final_chat_dfb_system2, results_dfb_system2 = make_results_dfs_to_retest(analysis_dfb_where_failed)
+# final_chat_dfb_system2.to_pickle(f"data_dump/fchat_df_system1{git_hash()}.pkl")
+# ix = results_dfb_system2["manipulation"] != {"kind": None, "sep": None}
+# results_dfb_system1["sent_convo"][ix] = results_dfb_system1[ix].apply(
+#    lambda r: insert_prompt(make_system_prompt1, r["manipulation"]["sep"], r["sent_convo"]), axis=1
+# )
+# results_dfb_system2 = fill_out_results(results_dfb_system2)
+# results_dfb_system2.to_pickle(f"data_dump/r_df_system2{git_hash()}.pkl")
+# analysis_dfb_system2 = make_analysis_df(results_dfb_system2, final_chat_dfb_system2)
+# analysis_dfb_system2.to_pickle(f"data_dump/a_df_system2{git_hash()}.pkl")
+#
+# print_summaries(analysis_dfb_system2)
+# a_df_2 = copy.deepcopy(analysis_df)
+# a_df_2[_failed_ix] = analysis_dfb_system2
+# print_summaries(a_df_2)
 
 # %%
 # only for results_df are emptys are loaded as nans not ''
