@@ -769,7 +769,7 @@ def fill_out_results(df_frame, n_loops=1):
 # results_dfb.to_pickle(f"data_dump/resultsb_01_30_{git_hash()}.pkl")
 
 # results_dfc = fill_out_results(results_framec)
-# results_dfc.to_pickle(f"data_dump/resultsc_02_02_{git_hash()}.pkl")
+# results_dfc.to_pickle(f"data_dump/results_dfc_02_02_{git_hash()}.pkl")
 
 # results_df2 = fill_out_results(results_frame2)
 # results_df2.to_pickle(f"data_dump/results2_01_25_{git_hash()}.pkl")
@@ -783,7 +783,7 @@ def fill_out_results(df_frame, n_loops=1):
 results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
 
 results_dfb = pd.read_pickle("data_dump/results_dfb_01_30_2e513e8.pkl")
-results_dfc = pd.read_pickle("data_dump/resultsc_02_02_f1978a7.pkl")
+results_dfc = pd.read_pickle("data_dump/results_dfc_02_02_f1978a7.pkl")
 
 # results_df2 has 2 missing values, not sure oai wouldn't create completions for those
 results_df2 = pd.read_pickle("data_dump/_bad_results2_01_25_34d63d4.pkl")
@@ -885,7 +885,7 @@ final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
 
 results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
 results_dfb = pd.read_pickle("data_dump/results_dfb_01_30_2e513e8.pkl")
-results_dfc = pd.read_pickle("data_dump/resultsc_02_02_f1978a7.pkl")
+results_dfc = pd.read_pickle("data_dump/results_dfc_02_02_f1978a7.pkl")
 # results_df2 has 2 missing values, not sure oai wouldn't create completions for those
 results_df2 = pd.read_pickle("data_dump/_bad_results2_01_25_34d63d4.pkl")
 results_df3 = pd.read_pickle("data_dump/results_df3_01_26_7486c8c.pkl")
