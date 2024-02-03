@@ -165,12 +165,10 @@ def get_completion(model, s, sep=SEP, client=client):
     s = text_w_sep(s)
     response = client.chat.completions.create(
         model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Continue this story with {sep}:```{s}```",
-            }
-        ],
+        messages=[{
+            "role": "user",
+            "content": f"Continue this story with {sep}:```{s}```",
+        }],
     )
     # print(response)
     out = response.choices[0].message.content.replace(sep, "")
@@ -179,12 +177,10 @@ def get_completion(model, s, sep=SEP, client=client):
 
 def get_chat_completion(model, s, sep, client=client, **kwargs):
     if isinstance(s, str):
-        messages = [
-            {
-                "role": "user",
-                "content": s,  # f"Continue this story with {sep}:```{s}```", # also makes words 'worse'
-            }
-        ]
+        messages = [{
+            "role": "user",
+            "content": s,  # f"Continue this story with {sep}:```{s}```", # also makes words 'worse'
+        }]
     else:
         messages = s
     response = client.chat.completions.create(
@@ -206,3 +202,7 @@ def chat_to_str(conv):
     """
     # return "\n".join([x["content"] for x in conv if x["role"] == "user"])
     return "\n".join([x["content"] for x in conv])
+
+
+def git_hash():
+    return os.popen("git rev-parse --short HEAD").read().strip()
