@@ -1014,6 +1014,7 @@ def print_summaries(df):
     plt.title("Number of Conversations with N manipulations above 0.2")
     plt.show()
 
+
 # print_summaries(analysis_dfc)
 # print_summaries(analysis_dfb)
 # print_summaries(analysis_df)

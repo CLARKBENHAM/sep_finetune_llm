@@ -14,9 +14,8 @@ import glob
 import re
 import math
 from datetime import datetime
-
-from sklearn.decomposition import PCA
-from sklearn.linear_model import LogisticRegression
+from pprint import pprint
+from scipy.stats import binom_test
 
 # from pyarrow import parquet as pq
 from concurrent.futures import ThreadPoolExecutor
@@ -366,11 +365,107 @@ merged_df["mod_how_str"] = merged_df["manipulation"].apply(lambda d: f"{ord(d['s
 merged_df["new_minus_default_max_score"] = (
     merged_df["new_max_score"] - merged_df["default_max_score"]
 )
-
+# %% Print summaries
 print(merged_df["new_max_score"].describe(), merged_df["default_max_score"].describe())
-print(merged_df.groupby("mod_how_str")["new_minus_default_max_score"].agg(["mean", "sem"]).sort_values(by='mean'))
+print(
+    merged_df.groupby("mod_how_str")["new_minus_default_max_score"]
+    .agg(["mean", "sem"])
+    .sort_values(by="mean")
+)
+categories = [
+    "harassment",
+    "harassment/threatening",
+    "hate",
+    "hate/threatening",
+    "self-harm",
+    "self-harm/instructions",
+    "self-harm/intent",
+    "sexual",
+    "sexual/minors",
+    "violence",
+    "violence/graphic",
+]
+df = pd.concat([
+    pd.DataFrame({
+        c: (merged_df[f"new_{c}"] - merged_df[f"default_{c}"]).agg(
+            ["mean", "sem", lambda d: np.mean(d) / d.sem()]
+        )
+    }).transpose()
+    for c in categories
+]).rename(columns={"<lambda>": "t-score"})
+print(df.sort_values(by="t-score"))
+
+print(
+    "Percent of turns with max mod 10ppt lower from sep:"
+    f" {100*np.mean(merged_df['new_minus_default_max_score'] <= -0.1):.1f}%"
+)
+print(
+    "Percent of turns that got flagged that wouldn't have:"
+    f" {100*np.mean(merged_df['new_any_flagged'] - merged_df['default_any_flagged'] > 0):.1f}%"
+)
+missed_flag_ix = merged_df["new_any_flagged"] - merged_df["default_any_flagged"] < 0
+print(f"Percent of turns that should've got flagged but didn't: {100*np.mean(missed_flag_ix):.1f}%")
 # %%
-# skip if dropped nans
+# Read the strings where adding seperators worked
+not_flagged_convos = merged_df[missed_flag_ix]["default_sent_convo"]
+print(not_flagged_convos.value_counts().value_counts().sort_index())
+# 133 strs only work for 1, then ~30-40 work for 2-7
+
+value_counts = not_flagged_convos.value_counts()
+df = value_counts[value_counts > len(ORD_USE_BETWEEN) / 2].reset_index()
+df.columns = ["index", "value_counts"]
+df = df[["value_counts", "index"]]
+df.to_csv("data_dump/oai_mod/mostly_passed_flagging.csv", sep="\t", index=False)
+
+# %%
+# compare the langauge where adding serperators mostly worked
+chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
+cid2lang = chat_df[["conversation_id", "language"]].set_index("conversation_id")[
+    "language"
+]  # .to_dict("index")
+merged_df["language"] = merged_df["conversation_id"].apply(lambda c: cid2lang[c])
+
+lang_default = merged_df["language"].value_counts()
+lang_missed_flag = merged_df["language"][missed_flag_ix].value_counts()
+exp_lang_missed_flag = merged_df["language"].value_counts(normalize=True) * missed_flag_ix.sum()
+
+results = {}
+p = missed_flag_ix.sum() / len(merged_df)  # Success probability under null hypothesis
+for language in lang_default.index:
+    n = lang_default.loc[language]  # Number of trials
+    k = lang_missed_flag.loc[language]  # Number of successes
+    # Binomial test
+    p_value = binom_test(k, n, p)
+    results[language] = {"p_value": p_value, "ratio_change": (k / n) / p}
+
+sig_langs = {lan: d for lan, d in results.items() if d["p_value"] < 0.001 / len(lang_default.index)}
+sig_langs_df = pd.DataFrame(sig_langs.values())
+sig_langs_df.index = sig_langs.keys()
+sig_langs_df["num_missed_flagged"] = lang_missed_flag[sig_langs_df.index]
+sig_langs_df["exp_num_missed_flagged"] = (
+    exp_lang_missed_flag[sig_langs_df.index].round(0).astype(int)
+)
+with pd.option_context("display.float_format", "{:,.2e}".format):
+    print(sig_langs_df.sort_values("p_value"))
+print(
+    lang_default.loc[sig_langs.keys()] / lang_default.sum(),
+    lang_missed_flag.loc[sig_langs.keys()] / lang_missed_flag.sum(),
+)
+
+# %% Can you combine the conditions?
+check_langs = ["Portuguese", "French", "unknown", "Russian"]
+is_lang = merged_df["language"].isin(check_langs)
+sep192 = merged_df["manipulation"].apply(lambda d: d["sep"] == chr(192))
+ix = is_lang & sep192
+print(
+    f"Percent of turns that got flagged that wouldn't have on ({' or '.join(check_langs)}) and by"
+    " sep 192:"
+    f" {100*np.mean(merged_df['new_any_flagged'][ix] - merged_df['default_any_flagged'][ix] < 0):.1f}%"
+)
+
+
+# %%
+# code validation: skip if dropped nans
 assert (
     merged_df["new_sent_convo"].apply(type).value_counts()
     == merged_df["default_sent_convo"].apply(type).value_counts()
