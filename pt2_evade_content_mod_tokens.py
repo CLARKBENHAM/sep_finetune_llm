@@ -99,7 +99,7 @@ def make_results_frame(
     for ord_val in ord_vals:
         _r_df = pd.DataFrame(index=final_chat_df.index)
         _r_df["conversation_id"] = final_chat_df["conversation_id"]  # should've added
-        _r_df["new_completion"] = pd.NA
+        _r_df["new_completion"] = None
         _r_df["new_oai_mod"] = None
         _r_df["new_model"] = model
         if ord_val is None:
@@ -113,6 +113,7 @@ def make_results_frame(
                 lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
             )
             if make_new_convo is not None:
+                assert False
                 _r_df["sent_convo"] = _r_df.apply(make_new_convo, axis=1)
         new_dfs += [_r_df]
     return pd.concat(new_dfs)
@@ -124,19 +125,40 @@ check_mod_df = pd.concat([
     make_results_frame(chat_df, model="text-moderation-latest"),  # works with current package
 ])
 del check_mod_df["new_completion"]
-_check_mod_df = copy.deepcopy(check_mod_df)
-
+# %%
+MAX_MOD_ITEMS = 32
+MAX_TURN_TOKENS = 4096  # not sure if real
+MAX_MOD_TOKENS = 32768 - 5
+check_mod_df["sent_convo"] = check_mod_df["sent_convo"].apply(
+    lambda l: end_of_convo(
+        [
+            {
+                **c,
+                "content": (
+                    take_last_tokens(c["content"], MAX_TURN_TOKENS)
+                    if len(c["content"]) > MAX_TURN_TOKENS * 1.5
+                    else c["content"]
+                ),
+            }
+            for c in l[-MAX_MOD_ITEMS:]
+        ],
+        max_tokens=MAX_MOD_TOKENS,
+    )
+)
+check_mod_df.to_pickle(f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}.pkl")
+print(check_mod_df["sent_convo"].apply(num_tokens_from_messages).describe())
 # %%
 import math
+from datetime import datetime
 
 
 def _make_mod_request(mod_in, model):
     e2 = None
-    for ix in range(5):
+    for ix in range(4):
         try:
             mod = client.moderations.create(input=mod_in, model=model)
         except Exception as e:
-            time.sleep(1.5**ix)
+            time.sleep(15 + 3**ix)
             e2 = e
         else:
             return mod.model_dump()  # ["results"]
@@ -150,7 +172,9 @@ def make_mod_requests(r):
     if recover (insert single entries) vs. making it all yourself the first time
     but <0.05 pts off total
     """
-    if (not r["new_oai_mod"]) or math.isnan(r["new_oai_mod"]):
+    if (not r["new_oai_mod"]) or (
+        isinstance(r["new_oai_mod"], float) and math.isnan(r["new_oai_mod"])
+    ):
         return _make_mod_request([c["content"] for c in r["sent_convo"]], r["new_model"])
     out = r["new_oai_mod"]
     if len(out) != len(r["sent_convo"]):
@@ -163,15 +187,22 @@ def make_mod_requests(r):
     return out
 
 
-# does user affect the openai mod?
-with ThreadPoolExecutor(max_workers=10) as executor:
-    check_mod_df["new_oai_mod"] = list(
-        executor.map(make_mod_requests, check_mod_df.to_dict("records"))
-    )
+def make_mod_requests_with_progress(args):
+    index, total, r = args
+    if index % (total // 25) == 0:  # Update every 4%
+        print(f"Progress: {index / total * 100:.2f}% {datetime.now()}")
+    return make_mod_requests(r)
+
+
+total = len(check_mod_df)
+args = [(index, total, r) for index, r in enumerate(check_mod_df.to_dict("records"))]
+
+with ThreadPoolExecutor(max_workers=3) as executor:
+    check_mod_df["new_oai_mod"] = list(executor.map(make_mod_requests_with_progress, args))
+
 check_mod_df.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}.pkl")
 # %%
-# analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_18bd574_3.pkl")
-analysis_mod_df = pd.read_pickle("data_dump/oai_mod/temp_comp_results_b16473d.pkl")
+analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_0775b2e.pkl")
 analysis_mod_df["new_oai_mod"] = analysis_mod_df["new_oai_mod"].apply(
     lambda d: [{**d, "results": [r]} for r in d["results"]]
 )
