@@ -84,16 +84,23 @@ chat_df.to_pickle(f"data_dump/oai_mod/comparison_base_df{git_hash()}.pkl")
 
 # %%
 def make_results_frame(
-    final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="text-moderation-latest", make_new_convo=None
+    final_chat_df,
+    ord_vals=ORD_USE_BETWEEN + [None],
+    model="text-moderation-latest",
+    make_new_convo=None,
 ):
-    if model not in ("text-moderation-stable", "text-moderation-latest"):
+    # only valid model https://platform.openai.com/docs/models/moderation as of Feb 05
+    # is "text-moderation-007" but errors if don't use a '*-stable' or '*-latest'
+    # if model not in ("text-moderation-007"):
+    if model not in ("text-moderation-007", "text-moderation-stable", "text-moderation-latest"):
         print(f"WARN: model {model} not expected")
+
     new_dfs = []
     for ord_val in ord_vals:
         _r_df = pd.DataFrame(index=final_chat_df.index)
         _r_df["conversation_id"] = final_chat_df["conversation_id"]  # should've added
         _r_df["new_completion"] = pd.NA
-        _r_df["new_oai_mod"] = pd.NA
+        _r_df["new_oai_mod"] = None
         _r_df["new_model"] = model
         if ord_val is None:
             _r_df["sent_convo"] = final_chat_df["conversation"].apply(list)
@@ -113,20 +120,23 @@ def make_results_frame(
 
 chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
 check_mod_df = pd.concat([
-    make_results_frame(chat_df, model="text-moderation-stable"),
-    make_results_frame(chat_df, model="text-moderation-latest"),
+    # make_results_frame(chat_df, model="text-moderation-007"),
+    make_results_frame(chat_df, model="text-moderation-latest"),  # works with current package
 ])
 del check_mod_df["new_completion"]
-
+_check_mod_df = copy.deepcopy(check_mod_df)
 
 # %%
-def _make_mod_request(i, m):
+import math
+
+
+def _make_mod_request(mod_in, model):
     e2 = None
-    for i in range(5):
+    for ix in range(5):
         try:
-            mod = client.moderations.create(input=i, model=m)
+            mod = client.moderations.create(input=mod_in, model=model)
         except Exception as e:
-            time.sleep(1.5**i)
+            time.sleep(1.5**ix)
             e2 = e
         else:
             return mod.model_dump()  # ["results"]
@@ -135,28 +145,36 @@ def _make_mod_request(i, m):
 
 
 def make_mod_requests(r):
-    if r["new_oai_mod"] is None:
-        return [_make_mod_request(c, r["new_model"]) for c in r["sent_convo"]]
+    """
+    Warn: scores will be slightly different
+    if recover (insert single entries) vs. making it all yourself the first time
+    but <0.05 pts off total
+    """
+    if (not r["new_oai_mod"]) or math.isnan(r["new_oai_mod"]):
+        return _make_mod_request([c["content"] for c in r["sent_convo"]], r["new_model"])
     out = r["new_oai_mod"]
     if len(out) != len(r["sent_convo"]):
         print("tossing")
         out = [None] * len(r["sent_convo"])
-    # should've sent i['content']? Could just
     out = [
-        _make_mod_request(c, r["new_model"]) if o is None else o
+        _make_mod_request(c["content"], r["new_model"]) if o is None else o
         for c, o in zip(r["sent_convo"], out)
     ]
     return out
 
 
+# does user affect the openai mod?
 with ThreadPoolExecutor(max_workers=10) as executor:
-    # print(list(executor.map(make_mod_requests, check_mod_df.head().to_dict("records"))))
     check_mod_df["new_oai_mod"] = list(
         executor.map(make_mod_requests, check_mod_df.to_dict("records"))
     )
 check_mod_df.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}.pkl")
 # %%
-analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_18bd574_3.pkl")
+# analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_18bd574_3.pkl")
+analysis_mod_df = pd.read_pickle("data_dump/oai_mod/temp_comp_results_b16473d.pkl")
+analysis_mod_df["new_oai_mod"] = analysis_mod_df["new_oai_mod"].apply(
+    lambda d: [{**d, "results": [r]} for r in d["results"]]
+)
 d = copy.deepcopy(analysis_mod_df)
 assert (analysis_mod_df.sent_convo.apply(len) == analysis_mod_df.new_oai_mod.apply(len)).all()
 
@@ -174,10 +192,13 @@ analysis_mod_df[["convo_ix", "sent_convo", "new_oai_mod"]] = pd.DataFrame(
 analysis_mod_df = analysis_mod_df.drop(columns=["paired"])
 
 # check exploded correctly
-num_made = analysis_mod_df['new_model'].nunique() * analysis_mod_df['manipulation'].apply(str).nunique()
+num_made = (
+    analysis_mod_df["new_model"].nunique() * analysis_mod_df["manipulation"].apply(str).nunique()
+)
 assert d.sent_convo.apply(len).sum() == len(analysis_mod_df)
-if 'chat_df' in locals():
-    assert chat_df['conversation'].apply(len).sum() * num_made == len(analysis_mod_df)
+# #only for this subset
+# if 'chat_df' in locals():
+#    assert chat_df['conversation'].apply(len).sum() * num_made == len(analysis_mod_df)
 assert (
     d["new_oai_mod"].apply(lambda l: [d["id"] for d in l]).explode().sort_values().values
     == analysis_mod_df["new_oai_mod"].apply(lambda d: d["id"]).sort_values().values
@@ -189,10 +210,16 @@ assert (
     .sort_index()
     == (analysis_mod_df["conversation_id"].value_counts() / num_made).sort_index()
 ).all()
-assert analysis_mod_df.groupby(['conversation_id', 'convo_ix']).ngroups * num_made == len(analysis_mod_df)
-assert (d.sent_convo.apply(len).value_counts().sort_index() / num_made == (analysis_mod_df.groupby('conversation_id')['convo_ix'].max()+1).value_counts().sort_index()).all()
+assert analysis_mod_df.groupby(["conversation_id", "convo_ix"]).ngroups * num_made == len(
+    analysis_mod_df
+)
+assert (
+    d.sent_convo.apply(len).value_counts().sort_index() / num_made
+    == (analysis_mod_df.groupby("conversation_id")["convo_ix"].max() + 1)
+    .value_counts()
+    .sort_index()
+).all()
 
-#%%
 # del d
 print(analysis_mod_df.shape)
 
@@ -202,7 +229,7 @@ uniq_cols = ["mod_model", "convo_str", "man_str"]
 # What tried to set content mod model as
 analysis_mod_df = analysis_mod_df.rename(columns={"new_model": "_sent_model"})
 
-#analysis_mod_df = analysis_mod_df.query("_sent_model=='text-moderation-latest'")
+# analysis_mod_df = analysis_mod_df.query("_sent_model=='text-moderation-latest'")
 
 analysis_mod_df["mod_model"] = analysis_mod_df["new_oai_mod"].apply(lambda d: d["model"])
 analysis_mod_df["convo_str"] = analysis_mod_df["sent_convo"].apply(str)
@@ -216,14 +243,6 @@ if n - len(analysis_mod_df) > 0:
 check_cols = ["mod_model", "convo_ix", "conversation_id", "man_str"]
 assert analysis_mod_df[check_cols].drop_duplicates().shape[0] == analysis_mod_df.shape[0]
 d = copy.deepcopy(analysis_mod_df)
-
-#%%
-duplicate_mask = d.duplicated(subset=uniq_cols, keep='first')
-dropped_rows = analysis_mod_df[duplicate_mask]
-print(dropped_rows)
-# This makes dups, shouldn't have any dups
-# Change this to filter all dups at the start
-analysis_mod_df.query("conversation_id=='82af34c6bdee4cf18d5e3b203ce5fefa' and convo_ix==9")['sent_convo']
 
 # %%
 analysis_mod_df = copy.deepcopy(d)
@@ -253,9 +272,10 @@ def explode_moderation_results(df, prefix, keep=None):
         )
     return exploded_mod
 
+
 # already uniq on convo_str so conversation_id and convo_ix are unique here
 join_on = ["conversation_id", "convo_ix", "mod_model"]
-keep_cols = join_on + ["sent_convo"]
+keep_cols = join_on + ["sent_convo", "new_oai_mod"]
 new_only_cols = keep_cols + ["manipulation"]
 print(f"Dropping columns: {set(analysis_mod_df.columns) - set(new_only_cols)}")
 some_mod = analysis_mod_df["manipulation"].apply(
@@ -266,8 +286,8 @@ new_mod = explode_moderation_results(analysis_mod_df[some_mod], "new", keep=new_
 )
 default_mod = explode_moderation_results(
     analysis_mod_df[~some_mod], "default", keep=keep_cols
-).rename(columns={"sent_convo": "default_sent_convo"})
-# %%
+).rename(columns={"sent_convo": "default_sent_convo", "new_oai_mod": "default_oai_mod"})
+
 merged_df = (
     new_mod.set_index(join_on)
     .merge(default_mod.set_index(join_on), left_index=True, right_index=True, how="left")
@@ -275,7 +295,10 @@ merged_df = (
 )
 print(merged_df.shape)
 # %%
-assert (merged_df["new_sent_convo"].apply(type).value_counts() == merged_df["default_sent_convo"].apply(type).value_counts()).all()
+assert (
+    merged_df["new_sent_convo"].apply(type).value_counts()
+    == merged_df["default_sent_convo"].apply(type).value_counts()
+).all()
 for c in join_on:
     assert (
         new_mod[c].value_counts().sort_index() == merged_df[c].value_counts().sort_index()
@@ -289,53 +312,205 @@ assert (
     .sort_index()
     .equals(merged_df.set_index(join_on)["new_sent_convo"].sort_index())
 ), "new convo off"
-#%%
-assert merged_df["new_sent_convo"].apply(lambda d: d['content']).nunique() == len(merged_df)
-#%%
-# 8203 vs 8200
+assert len(set(merged_df["new_sent_convo"].apply(lambda d: d["content"]))) == len(merged_df)
+# added below since counts were wrong above if used .nunique() not len(set(
 assert (
-    analysis_mod_df.set_index(join_on)["sent_convo"][~some_mod.values].apply(lambda d: d['content'])
+    analysis_mod_df.set_index(join_on)["sent_convo"][~some_mod.values]
+    .apply(lambda d: str(d["content"]))
     .sort_index()
-    .equals(merged_df.set_index(join_on)["default_sent_convo"].sort_index().apply(lambda d: d['content']).unique())
-), "default convo off"
+    .values
+    == (
+        merged_df.set_index(join_on)["default_sent_convo"]
+        .sort_index()
+        .apply(lambda d: str(d["content"]))
+        .unique()
+    )
+).all(), "default_sent_convo off"
 
-#%%
 assert (
-    analysis_mod_df.set_index(join_on)["new_oai_mod"].apply(lambda d: d[] )[some_mod.values]
+    analysis_mod_df.set_index(join_on)["new_oai_mod"]
+    .apply(lambda d: d["id"])[some_mod.values]
     .sort_index()
-    .equals(merged_df.set_index(join_on)["new_sent_convo"].sort_index())
-), "max scores off"
+    .equals(merged_df.set_index(join_on)["new_oai_mod"].apply(lambda d: d["id"]).sort_index())
+), "new_oai_mod id's off"
+assert (
+    analysis_mod_df.set_index(join_on)["new_oai_mod"]
+    .apply(lambda d: chat_max_scores(d["results"]))[some_mod.values]
+    .sort_index()
+    .equals(
+        merged_df.set_index(join_on)["new_oai_mod"]
+        .apply(lambda d: chat_max_scores(d["results"]))
+        .sort_index()
+    )
+), "oai_mod max scores off"
+
+merged_df["mod_how_str"] = merged_df["manipulation"].apply(lambda d: f"{ord(d['sep'])}_{d['kind']}")
+# return merged_df
 # %%
-merged_df.set_index(join_on)["new_sent_convo"] == analysis_mod_df.set_index(join_on).iloc[
-    : len(new_mod)
-]["sent_convo"]
-# d1 = analysis_mod_df.set_index(["mod_model", "conversation_id"])
-# d2 = new_mod.set_index("conversation_id")
-# d3 = default_mod.set_index("conversation_id")
-# pd.concat([d2, d3], axis=1)
+mod_a = (
+    analysis_mod_df["new_oai_mod"][some_mod]
+    .apply(lambda d: chat_max_scores(d["results"]))
+    .describe()
+)
+mod_m = merged_df["new_max_score"].describe()
+assert mod_a.round(3).equals(mod_m.round(3))
+
+# drop std since the array sizes are different
+nmod_a = (
+    analysis_mod_df["new_oai_mod"][~some_mod]
+    .apply(lambda d: chat_max_scores(d["results"]))
+    .describe()
+    .drop(["count", "std"])
+)
+nmod_m = merged_df["default_max_score"].describe().drop(["count", "std"])
+assert nmod_a.round(3).equals(nmod_m.round(3))
 # %%
-# join these on metada cols
-out["mod_how_str"] = out["manipulation"].apply(lambda d: f"{ord(d['sep'])}_{d['kind']}")
-print(out["new_max_score"].describe(), out["default_max_score"].describe())
-return out
+print(merged_df["new_max_score"].describe(), merged_df["default_max_score"].describe())
+print(merged_df.groupby("mod_how_str")["new_max_score"].describe())
+
 # %%
-# del out["convo_str"]
-# return out
+from scipy.stats import ks_2samp
+from matplotlib import colors
+import hashlib
+
+
+def str_to_color(string):
+    hash_object = hashlib.md5(string.encode())
+    # Take parts of the hash for hue, saturation, and lightness
+    # hue = int(hash_object.hexdigest()[:3], 16) % 360  # Hue: 0-360
+    # sat = int(hash_object.hexdigest()[3:5], 16) % 101  # Saturation: 0-100%
+    # light = int(hash_object.hexdigest()[5:7], 16) % 101  # Lightness: 0-100%
+    # return f"hsl({hue}, {sat}%, {light}%)"
+
+    f = lambda s: (int(hash_object.hexdigest()[s], 16) % 100) / 100
+    hue = f(slice(0, 2))
+    f_min50 = (
+        lambda s: 0.5 + (int(hash_object.hexdigest()[s], 16) % 50) / 100
+    )  # Ensures sat and v are at least 50%
+    sat = f_min50(slice(2, 4))
+    v = f_min50(slice(4, 6))
+    return colors.hsv_to_rgb((hue, sat, v))
+
+
+def get_name(d, n, default=""):
+    if n is None:
+        n = getattr(d, "name", None)
+    if n is None:
+        n = getattr(d, "columns", [None])[0]
+    if n is None:
+        n = default
+    return n
+
+
+def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    col1, col2 = get_name(data1, col1, "1"), get_name(data2, col2, "2")
+    # sns.histplot(data1, color=str_to_color(col1), alpha=0.5, label=col1, ax=ax)
+    # sns.histplot(data2, color=str_to_color(col2), alpha=0.5, label=col2, ax=ax)
+    ax.hist(
+        data1,
+        color=str_to_color(col1),
+        alpha=0.5,
+        label=col1 + f" m: {data1.mean():.2f} sem: {data1.sem():.2f}",
+        # density=True,
+    )
+    ax.hist(
+        data2,
+        color=str_to_color(col2),
+        alpha=0.5,
+        label=col2 + f" m: {data2.mean():.2f} sem: {data2.sem():.2f}",
+        # density=True,
+    )
+    statistic, p_value = ks_2samp(data1.dropna(), data2.dropna(), alternative="two-sided")
+    title = f"{col1} vs {col2}"
+    title += f"\nKS Statistic: {statistic:.3f}, P-Value: {p_value:.3f}"
+    color = "red" if p_value < sig_level else "black"
+    ax.set_title(title, color=color)
+    ax.legend()
+    return ax
+
+
+_ks_hist_plot(data1=merged_df["new_max_score"], data2=merged_df["default_max_score"])
+# print(data1.agg(["mean", "sem"]), data2.agg(["mean", "sem"]))
 # %%
-# Basically nothing got moderated though?
-analysis_mod_df.query('conversation_id=="74ef5861d9dc49de9dcf6484872d6bec"')["new_oai_mod"].apply(
-    lambda d: max(d["results"][0]["category_scores"].values())
-).value_counts()
-# max 0.006, w and w/o manipulation
-[max(d["category_scores"].values()) for d in chat_df["openai_moderation"].iloc[0]]
-# is all 0.99s
-# and content the same
-assert [d["content"] for d in chat_df["conversation"].iloc[0]] == [
-    d["content"]
-    for d in analysis_mod_df.query('conversation_id=="74ef5861d9dc49de9dcf6484872d6bec"')[
-        "sent_convo"
-    ]
-][-8:]
+# %%
+p = np.arange(0, 1, 0.05)
+print(
+    analysis_mod_df["new_oai_mod"][some_mod]
+    .apply(lambda d: chat_max_scores(d["results"]))
+    .describe(percentiles=p),
+    analysis_mod_df["new_oai_mod"][~some_mod]
+    .apply(lambda d: chat_max_scores(d["results"]))
+    .describe(percentiles=p),
+)
 
 # %%
 df = analysis_mod_df.head(10)
+
+# %%
+# assert merged_df["new_sent_convo"].apply(lambda d: d["content"]).nunique() == len(merged_df)
+# Don't know why .nunique != len(set())
+s, e = 0, len(merged_df)
+m = (s + e) // 2
+while s != m and m != e:
+    df = merged_df["new_sent_convo"].iloc[s:m]
+    if df.apply(lambda d: d["content"]).nunique() < len(df):
+        e = m - 1
+        print("good", s, m)
+    else:
+        s = m + 1
+    m = (s + e) // 2
+    print(s, m, e)
+s, m = 0, 48
+df = merged_df["new_sent_convo"][s:m]
+print(
+    df.apply(lambda d: d["content"]).nunique(), len(set(df.apply(lambda d: d["content"]))), len(df)
+)
+df.to_pickle("data_dump/data_df_where_content_nunique_doesnt_match_set_of_content")
+
+# %%
+# Check equal if it matters to send the whole conversation in at once or in pieces
+import random
+
+for d in random.sample(check_mod_df.to_dict("records"), 10):
+    r2 = client.moderations.create(input=[i["content"] for i in d["sent_convo"]])
+    r2s = [client.moderations.create(input=i["content"]) for i in d["sent_convo"]]
+    score1 = np.array([max(res.category_scores.model_dump().values()) for res in r2.results])
+    score2 = np.array(
+        [max(res["category_scores"].values()) for _r2 in r2s for res in _r2.model_dump()["results"]]
+    )
+    print(np.abs(score1 - score2).sum())
+    # assertion triggers
+    assert (np.around(score1, 2) == np.around(score2, 2)).all(), d["sent_convo"]
+# Scores are mostly the same, but not identical
+
+# d=check_mod_df.iloc[-1:].to_dict("records")[0]
+# r=client.moderations.create(input=d['sent_convo'][0]['content'])
+# print(max(r.results[0].category_scores.model_dump().values()))
+
+# %% Random Scrape
+duplicate_mask = d.duplicated(subset=uniq_cols, keep="first")
+dropped_rows = analysis_mod_df[duplicate_mask]
+print(dropped_rows)
+# This makes dups, shouldn't have any dups
+# Change this to filter all dups at the start
+analysis_mod_df.query("conversation_id=='82af34c6bdee4cf18d5e3b203ce5fefa' and convo_ix==9")[
+    "sent_convo"
+]
+# %% Scrape
+r2 = client.moderations.create(input=[i["content"] for i in d["sent_convo"]])
+print(len(r2.results))
+print(max(r2.results[0].category_scores.model_dump().values()))
+print([max(res.category_scores.model_dump().values()) for res in r2.results])
+# %%
+# r2s = [client.moderations.create(input=i['content']) for i in d['sent_convo']]
+# print(max(r2s.results[0].category_scores.model_dump().values()))
+print([max(res["category_scores"].values()) for _r2 in r2s for res in _r2.model_dump()["results"]])
+# %%
+o = make_mod_requests(d)
+print(o)
+print([len(i["results"]) for i in o])
+print([max(i["results"][0]["category_scores"].values()) for i in o])
+# %%
