@@ -1014,7 +1014,6 @@ def print_summaries(df):
     plt.title("Number of Conversations with N manipulations above 0.2")
     plt.show()
 
-
 # print_summaries(analysis_dfc)
 # print_summaries(analysis_dfb)
 # print_summaries(analysis_df)
@@ -1287,15 +1286,12 @@ import math
 def str_to_color(string):
     hash_object = hashlib.md5(string.encode())
     # Take parts of the hash for hue, saturation, and lightness
-    # hue = int(hash_object.hexdigest()[:3], 16) % 360  # Hue: 0-360
-    # sat = int(hash_object.hexdigest()[3:5], 16) % 101  # Saturation: 0-100%
-    # light = int(hash_object.hexdigest()[5:7], 16) % 101  # Lightness: 0-100%
-    # return f"hsl({hue}, {sat}%, {light}%)"
-
-    f = lambda s: (int(hash_object.hexdigest()[s], 16) % 100) / 100
-    hue = f(slice(0, 2))
-    sat = f(slice(2, 4))
-    v = f(slice(4, 6))
+    f360 = lambda s: (int(hash_object.hexdigest()[s], 16) % 360) / 360
+    # Ensures sat and v are at least 50%
+    f100_min50 = lambda s: 0.5 + (int(hash_object.hexdigest()[s], 16) % 50) / 100
+    hue = f360(slice(0, 3))
+    sat = f100_min50(slice(3, 5))
+    v = f100_min50(slice(5, 7))
     return colors.hsv_to_rgb((hue, sat, v))
 
 
