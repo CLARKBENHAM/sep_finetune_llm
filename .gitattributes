@@ -1,3 +1,4 @@
 bad_text/ filter=lfs diff=lfs merge=lfs -text
 oai_files/ filter=lfs diff=lfs merge=lfs -text
 *.pkl filter=lfs diff=lfs merge=lfs -text
+data_dump/oai_mod/comp_results_ba0cefe.pkl filter=lfs diff=lfs merge=lfs -text
