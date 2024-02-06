@@ -368,7 +368,7 @@ merged_df["new_minus_default_max_score"] = (
 )
 
 print(merged_df["new_max_score"].describe(), merged_df["default_max_score"].describe())
-print(merged_df.groupby("mod_how_str")["new_minus_default_max_score"].agg(["mean", "sem"]))
+print(merged_df.groupby("mod_how_str")["new_minus_default_max_score"].agg(["mean", "sem"]).sort_values(by='mean'))
 # %%
 # skip if dropped nans
 assert (
