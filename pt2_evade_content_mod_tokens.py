@@ -12,6 +12,8 @@ import ast
 from collections import Counter
 import glob
 import re
+import math
+from datetime import datetime
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -53,16 +55,21 @@ MN_TOKENS = 50
 
 
 def chat_max_scores(openai_moderation):
+    if "results" in openai_moderation:
+        openai_moderation = openai_moderation["results"]
     return max([max(m["category_scores"].values()) for m in openai_moderation])
 
 
 def chat_max_by_cat(openai_moderation, categories=None):
     """Max score of any chat in convo by category"""
+    if "results" in openai_moderation:
+        openai_moderation = openai_moderation["results"]
     if categories is None:
         categories = list(openai_moderation[0]["category_scores"].keys())
     return {c: max((r["category_scores"][c] for r in openai_moderation)) for c in categories}
 
 
+# can skip to l:225 "Start of Analysis"
 # %%
 files = [
     "data_dump/lmsys-chat-1m/train-00000-of-00006-4feeb3f83346a0e9.parquet",
@@ -125,9 +132,9 @@ check_mod_df = pd.concat([
     make_results_frame(chat_df, model="text-moderation-latest"),  # works with current package
 ])
 del check_mod_df["new_completion"]
-# %%
+
 MAX_MOD_ITEMS = 32
-MAX_TURN_TOKENS = 4096  # not sure if real
+MAX_TURN_TOKENS = 4096  # not sure if real limitation
 MAX_MOD_TOKENS = 32768 - 5
 check_mod_df["sent_convo"] = check_mod_df["sent_convo"].apply(
     lambda l: end_of_convo(
@@ -148,21 +155,22 @@ check_mod_df["sent_convo"] = check_mod_df["sent_convo"].apply(
 check_mod_df.to_pickle(f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}.pkl")
 print(check_mod_df["sent_convo"].apply(num_tokens_from_messages).describe())
 # %%
-import math
-from datetime import datetime
+# WARN: makes requests
 
 
 def _make_mod_request(mod_in, model):
     e2 = None
-    for ix in range(4):
+    for ix in range(5):
         try:
+            if e2 is not None:
+                time.sleep(15 + 4**ix)
             mod = client.moderations.create(input=mod_in, model=model)
         except Exception as e:
-            time.sleep(15 + 3**ix)
             e2 = e
         else:
             return mod.model_dump()  # ["results"]
-    print(e2)
+    print(datetime.now(), e2)
+    print(e2["response"])
     return None
 
 
@@ -172,37 +180,55 @@ def make_mod_requests(r):
     if recover (insert single entries) vs. making it all yourself the first time
     but <0.05 pts off total
     """
-    if (not r["new_oai_mod"]) or (
-        isinstance(r["new_oai_mod"], float) and math.isnan(r["new_oai_mod"])
-    ):
+
+    if (not r["new_oai_mod"]) or pd.isna(r["new_oai_mod"]):  # making full from empty row
+        print(datetime.now(), "new row")
         return _make_mod_request([c["content"] for c in r["sent_convo"]], r["new_model"])
-    out = r["new_oai_mod"]
-    if len(out) != len(r["sent_convo"]):
-        print("tossing")
-        out = [None] * len(r["sent_convo"])
-    out = [
-        _make_mod_request(c["content"], r["new_model"]) if o is None else o
-        for c, o in zip(r["sent_convo"], out)
-    ]
-    return out
+    n_results = max(
+        len([m for m in r["new_oai_mod"] if m and pd.notna(m) and isinstance(m, list)]),
+        len([m for m in r["new_oai_mod"]["results"] if m and pd.notna(m)]),
+    )
+    exp_results = len(r["sent_convo"])
+    if n_results == exp_results:  # already complete row
+        print("skipping")
+        return r["new_oai_mod"]
+    else:
+        print("filling in parts, this will change data formating")
+        assert False
+        out = r["new_oai_mod"]
+        if exp_results != n_results:
+            print("WARN: tossing all previous")
+            out = [None] * len(r["sent_convo"])
+        out = [
+            _make_mod_request(c["content"], r["new_model"]) if o is None else o
+            for c, o in zip(r["sent_convo"], out)
+        ]
+        return out
 
 
 def make_mod_requests_with_progress(args):
     index, total, r = args
-    if index % (total // 25) == 0:  # Update every 4%
-        print(f"Progress: {index / total * 100:.2f}% {datetime.now()}")
+    if index % (total // 25) == 0:
+        print(f"Progress: {index / total * 100:.2f}% {datetime.now()}\n")
     return make_mod_requests(r)
 
 
+check_mod_df = pd.read_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_full.pkl")
 total = len(check_mod_df)
 args = [(index, total, r) for index, r in enumerate(check_mod_df.to_dict("records"))]
 
-with ThreadPoolExecutor(max_workers=3) as executor:
+with ThreadPoolExecutor(max_workers=2) as executor:
     check_mod_df["new_oai_mod"] = list(executor.map(make_mod_requests_with_progress, args))
+    # o = list(executor.map(make_mod_requests_with_progress, args[:5]))
 
-check_mod_df.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}.pkl")
+check_mod_df.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_full.pkl")
 # %%
-analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_0775b2e.pkl")
+# Start of Analysis
+
+analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_ba0cefe.pkl")
+print(f"Droping nans: {analysis_mod_df.isna().sum().sum()}")
+analysis_mod_df = analysis_mod_df.dropna()
+
 analysis_mod_df["new_oai_mod"] = analysis_mod_df["new_oai_mod"].apply(
     lambda d: [{**d, "results": [r]} for r in d["results"]]
 )
@@ -221,7 +247,8 @@ analysis_mod_df[["convo_ix", "sent_convo", "new_oai_mod"]] = pd.DataFrame(
     analysis_mod_df["paired"].tolist(), index=analysis_mod_df.index
 )
 analysis_mod_df = analysis_mod_df.drop(columns=["paired"])
-
+# %%
+# skip if dropped nans
 # check exploded correctly
 num_made = (
     analysis_mod_df["new_model"].nunique() * analysis_mod_df["manipulation"].apply(str).nunique()
@@ -250,35 +277,41 @@ assert (
     .value_counts()
     .sort_index()
 ).all()
-
-# del d
+# %%
+# de-dup convo_str's that were the same but from different conversations
 print(analysis_mod_df.shape)
 
-# cols should be unique on: maybe dup strings; def dup models
+# cols should be unique on
 uniq_cols = ["mod_model", "convo_str", "man_str"]
 
 # What tried to set content mod model as
 analysis_mod_df = analysis_mod_df.rename(columns={"new_model": "_sent_model"})
 
-# analysis_mod_df = analysis_mod_df.query("_sent_model=='text-moderation-latest'")
-
 analysis_mod_df["mod_model"] = analysis_mod_df["new_oai_mod"].apply(lambda d: d["model"])
 analysis_mod_df["convo_str"] = analysis_mod_df["sent_convo"].apply(str)
 analysis_mod_df["man_str"] = analysis_mod_df["manipulation"].astype(str)
-
-n = len(analysis_mod_df)
-analysis_mod_df = analysis_mod_df.drop_duplicates(subset=uniq_cols)
-if n - len(analysis_mod_df) > 0:
-    print(f"WARN: dropped {n-len(analysis_mod_df)} duplicates based on {uniq_cols}")
+extra_dup_mask = analysis_mod_df.duplicated(subset=uniq_cols, keep="first")
+if extra_dup_mask.sum() > 0:
+    # Avg L1-norm amoung maxscore for duplicated values
+    assert (
+        analysis_mod_df[analysis_mod_df.duplicated(subset=uniq_cols, keep=False)]
+        .groupby(uniq_cols)["new_oai_mod"]
+        .transform(lambda x: x.apply(chat_max_scores))
+        .apply(lambda x: np.sum(np.abs(x - np.mean(x))))
+        .mean()
+    ) == 0
+    extra_dups = analysis_mod_df[extra_dup_mask]
+    analysis_mod_df = analysis_mod_df[~extra_dup_mask]
+    print(f"WARN: dropped {extra_dup_mask.sum()} duplicates based on {uniq_cols}")
+    print(extra_dups.groupby(["mod_model", "man_str"]).size())
+    print("Max Scores where dropped", extra_dups["new_oai_mod"].apply(chat_max_scores).describe())
 # check dropped dups all
 check_cols = ["mod_model", "convo_ix", "conversation_id", "man_str"]
 assert analysis_mod_df[check_cols].drop_duplicates().shape[0] == analysis_mod_df.shape[0]
 d = copy.deepcopy(analysis_mod_df)
 
+
 # %%
-analysis_mod_df = copy.deepcopy(d)
-
-
 # split into x and y values
 def explode_moderation_results(df, prefix, keep=None):
     """
@@ -325,7 +358,19 @@ merged_df = (
     .reset_index()
 )
 print(merged_df.shape)
+
+# Shouldn't have to do this
+print(f"WARN: dropping NAs: {merged_df.isna().any(axis=1).sum()}")
+merged_df = merged_df.dropna()
+merged_df["mod_how_str"] = merged_df["manipulation"].apply(lambda d: f"{ord(d['sep'])}_{d['kind']}")
+merged_df["new_minus_default_max_score"] = (
+    merged_df["new_max_score"] - merged_df["default_max_score"]
+)
+
+print(merged_df["new_max_score"].describe(), merged_df["default_max_score"].describe())
+print(merged_df.groupby("mod_how_str")["new_minus_default_max_score"].agg(["mean", "sem"]))
 # %%
+# skip if dropped nans
 assert (
     merged_df["new_sent_convo"].apply(type).value_counts()
     == merged_df["default_sent_convo"].apply(type).value_counts()
@@ -333,11 +378,11 @@ assert (
 for c in join_on:
     assert (
         new_mod[c].value_counts().sort_index() == merged_df[c].value_counts().sort_index()
-    ).all(), f"{c}1"
+    ).all(), f"{c} new_mod vs merged differs"
     assert (
         merged_df[c].value_counts().sort_index() + default_mod[c].value_counts().sort_index()
         == analysis_mod_df[c].value_counts().sort_index()
-    ).all(), f"{c}2"
+    ).all(), f"{c} merged + default vs analsysi_mod_df differs"
 assert (
     analysis_mod_df.set_index(join_on)["sent_convo"][some_mod.values]
     .sort_index()
@@ -375,9 +420,6 @@ assert (
     )
 ), "oai_mod max scores off"
 
-merged_df["mod_how_str"] = merged_df["manipulation"].apply(lambda d: f"{ord(d['sep'])}_{d['kind']}")
-# return merged_df
-# %%
 mod_a = (
     analysis_mod_df["new_oai_mod"][some_mod]
     .apply(lambda d: chat_max_scores(d["results"]))
@@ -386,7 +428,7 @@ mod_a = (
 mod_m = merged_df["new_max_score"].describe()
 assert mod_a.round(3).equals(mod_m.round(3))
 
-# drop std since the array sizes are different
+# since the array sizes are different, drop count std
 nmod_a = (
     analysis_mod_df["new_oai_mod"][~some_mod]
     .apply(lambda d: chat_max_scores(d["results"]))
@@ -395,9 +437,8 @@ nmod_a = (
 )
 nmod_m = merged_df["default_max_score"].describe().drop(["count", "std"])
 assert nmod_a.round(3).equals(nmod_m.round(3))
-# %%
-print(merged_df["new_max_score"].describe(), merged_df["default_max_score"].describe())
-print(merged_df.groupby("mod_how_str")["new_max_score"].describe())
+
+# return merged_df
 
 # %%
 from scipy.stats import ks_2samp
@@ -408,18 +449,12 @@ import hashlib
 def str_to_color(string):
     hash_object = hashlib.md5(string.encode())
     # Take parts of the hash for hue, saturation, and lightness
-    # hue = int(hash_object.hexdigest()[:3], 16) % 360  # Hue: 0-360
-    # sat = int(hash_object.hexdigest()[3:5], 16) % 101  # Saturation: 0-100%
-    # light = int(hash_object.hexdigest()[5:7], 16) % 101  # Lightness: 0-100%
-    # return f"hsl({hue}, {sat}%, {light}%)"
-
-    f = lambda s: (int(hash_object.hexdigest()[s], 16) % 100) / 100
-    hue = f(slice(0, 2))
-    f_min50 = (
-        lambda s: 0.5 + (int(hash_object.hexdigest()[s], 16) % 50) / 100
-    )  # Ensures sat and v are at least 50%
-    sat = f_min50(slice(2, 4))
-    v = f_min50(slice(4, 6))
+    f360 = lambda s: (int(hash_object.hexdigest()[s], 16) % 360) / 360
+    # Ensures sat and v are at least 50%
+    f100_min50 = lambda s: 0.5 + (int(hash_object.hexdigest()[s], 16) % 50) / 100
+    hue = f360(slice(0, 3))
+    sat = f100_min50(slice(3, 5))
+    v = f100_min50(slice(5, 7))
     return colors.hsv_to_rgb((hue, sat, v))
 
 
@@ -438,21 +473,17 @@ def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
         fig, ax = plt.subplots()
 
     col1, col2 = get_name(data1, col1, "1"), get_name(data2, col2, "2")
-    # sns.histplot(data1, color=str_to_color(col1), alpha=0.5, label=col1, ax=ax)
-    # sns.histplot(data2, color=str_to_color(col2), alpha=0.5, label=col2, ax=ax)
     ax.hist(
         data1,
         color=str_to_color(col1),
         alpha=0.5,
-        label=col1 + f" m: {data1.mean():.2f} sem: {data1.sem():.2f}",
-        # density=True,
+        label=col1 + f" m: {data1.mean():.3f} sem: {data1.sem():.3f}",
     )
     ax.hist(
         data2,
         color=str_to_color(col2),
         alpha=0.5,
-        label=col2 + f" m: {data2.mean():.2f} sem: {data2.sem():.2f}",
-        # density=True,
+        label=col2 + f" m: {data2.mean():.3f} sem: {data2.sem():.3f}",
     )
     statistic, p_value = ks_2samp(data1.dropna(), data2.dropna(), alternative="two-sided")
     title = f"{col1} vs {col2}"
@@ -463,8 +494,183 @@ def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
     return ax
 
 
-_ks_hist_plot(data1=merged_df["new_max_score"], data2=merged_df["default_max_score"])
-# print(data1.agg(["mean", "sem"]), data2.agg(["mean", "sem"]))
+data1 = merged_df["new_max_score"]
+data2 = merged_df["default_max_score"]
+fig, ax = plt.subplots(figsize=(10, 6))
+ax = _ks_hist_plot(data1, data2, col1="with seperators", col2="w/o seperators", ax=ax)
+fig.suptitle(f"{', '.join(merged_df['mod_model'].unique())} Max Category Score per Message")
+fig.subplots_adjust(top=0.86)
+fig.savefig(f"plots/oai_mod/average_max_scores_yn_seperators_{git_hash()}.png")
+# %%
+import scipy.stats as stats
+
+
+def reg_plot(
+    x1,
+    y1,
+    x_name=None,
+    y_name=None,
+    title=None,
+):
+    x_name, y_name = get_name(x1, x_name, "X"), get_name(y1, y_name, "Y")
+    if title is None:
+        title = f"{y_name} vs {x_name}"
+
+    ax = sns.regplot(
+        x=x1, y=y1, scatter=True, ci=95, line_kws={"color": "red"}, scatter_kws={"s": 2}
+    )
+    ax.set_title(title)
+    ax.set_ylabel(y_name)
+    ax.set_xlabel(x_name)
+    corr, p = stats.pearsonr(x1, y1)
+    ax.text(
+        0.05,
+        0.95,
+        f"corr: {corr:.2f} p: {p:.2f}",
+        horizontalalignment="left",
+        verticalalignment="top",
+        transform=ax.transAxes,
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+def avg_by_bucket(X, Y, x_name=None, y_name=None, ax=None, by_width=False):
+    """Bin X. Then plot average Y's for each bin of X"""
+    x_name, y_name = get_name(X, x_name, "X"), get_name(Y, y_name, "Y")
+    if ax is None:
+        fig, ax = plt.subplots()
+    # equal width buckets
+    if by_width:
+        buckets = pd.cut(X, bins=min(20, math.ceil((len(X) + 1) / 10)))
+    else:
+        # equal num element buckets
+        buckets = pd.qcut(X, q=min(10, math.ceil((len(X) + 1) / 10)), duplicates="drop")
+    bucket_means = pd.DataFrame({x_name: X, y_name: Y}).groupby(buckets)[y_name].mean()
+    ax.bar(range(len(bucket_means)), bucket_means, color=str_to_color(y_name))
+    ax.set_xticks(
+        range(len(bucket_means)),
+        [f"{interval.mid:.0f}" for interval in bucket_means.index],
+        rotation=90,
+    )
+    ax.set_xlabel(x_name)
+    ax.set_ylabel(y_name)
+    ax.figure.tight_layout()
+    return ax
+
+
+def prompt_lengths_vs_max_score(df, by_width=False):
+    """
+    plot both prompt length and output length vs max mod score
+    """
+    prompt_lens = df["new_sent_convo"].apply(lambda d: num_tokens_from_messages([d]))
+    prompt_lens.name = "Sent Convo Num Tokens"
+    og_prompt_lens = df["default_sent_convo"].apply(lambda d: num_tokens_from_messages([d]))
+    og_prompt_lens.name = "Original Convo Num Tokens"
+    new_max_scores = copy.deepcopy(df["new_max_score"])
+    new_max_scores.name = "Avg Max Mod with seperators"
+    # reg_plot(og_prompt_lens, prompt_lens, "original len", "manipulation lens")
+    reg_plot(og_prompt_lens, new_max_scores)
+    reg_plot(prompt_lens, new_max_scores)
+
+    score_diff = new_max_scores - df["default_max_score"]
+    score_diff.name = "Avg Max Mod with seperators - w/o seperators"
+    reg_plot(og_prompt_lens, score_diff)
+
+    # Average mod by prompt len
+    ax = avg_by_bucket(prompt_lens, score_diff, by_width=by_width)
+    plt.show()
+
+    ax = avg_by_bucket(og_prompt_lens, score_diff, by_width=by_width)
+    plt.show()
+
+
+prompt_lengths_vs_max_score(merged_df)
+# %%
+# Longest prompts have bigger difference
+i = 800
+gt_800_tokens = merged_df["default_sent_convo"].apply(lambda d: num_tokens_from_messages([d])) > i
+print(i)
+fig, ax = plt.subplots(figsize=(7, 5))
+_ks_hist_plot(data1[gt_800_tokens], data2[gt_800_tokens], ax=ax)
+fig.suptitle(f"Original convo turn was >{i} tokens")
+fig.subplots_adjust(top=0.86)
+fig.savefig(f"plots/oai_mod/average_max_scores_yn_seperators_{git_hash()}_gt_800.png")
+# %%
+
+
+def plot_comparisons(df, cat_col, scores, comparison_type="categorical", sig_level=0.01):
+    """
+    Generate comparisons for different categories or scores as lower triangle
+
+    :param df: Pandas DataFrame with the data.
+    :param columns: List of columns for comparisons.
+    :param score_column: Column name of the numeric scores to compare.
+    :param comparison_type: Type of comparison - 'categorical' or 'score'.
+    """
+    if isinstance(scores, str):
+        scores = df[scores]
+    categories = df[cat_col].unique()
+    n = len(categories)
+    print(n, categories)
+    fig, axs = plt.subplots(n, n, figsize=(5 + 3 * n, 5 + 3 * n))
+    for i, cat1 in enumerate(categories):
+        for j, cat2 in enumerate(categories):
+            ax = axs[i, j]
+            if j < i:
+                # Comparing numeric scores for two different categories
+                if comparison_type == "categorical":
+                    # Comparing scores within categories
+                    data1 = scores[df[cat_col] == cat1]
+                    data2 = scores[df[cat_col] == cat2]
+                else:
+                    assert False
+                    # Comparing scores across different columns
+                    data1 = scores
+                    data2 = scores
+                _ks_hist_plot(data1, data2, col1=cat1, col2=cat2, ax=ax, sig_level=sig_level)
+            else:
+                ax.set_visible(False)
+
+    fig.tight_layout()
+    # label rows
+    for y, cat in enumerate(categories):
+        pos = axs[y, 0].get_position()
+        x0, y0, x1, y1 = [getattr(pos, i) for i in "x0, y0, x1, y1".split(", ")]
+        fig.text(-0.01, (y0 + y1) / 2, cat, va="center", fontsize=12, rotation="vertical")
+    # label cols
+    for x, cat in enumerate(categories):
+        pos = axs[0, x].get_position()
+        x0, y0, x1, y1 = [getattr(pos, i) for i in "x0, y0, x1, y1".split(", ")]
+        fig.text(
+            (x0 + x1) / 2,
+            -0.01,
+            cat,
+            ha="center",
+            fontsize=12,
+        )
+    fig.tight_layout()
+    fig.show()
+    return fig
+
+
+# # No difference in which seperator tokens which work best/worst for which categories
+for c in list(merged_df["new_oai_mod"].iloc[0]["results"][0]["category_scores"].keys())[1:]:
+    diff = merged_df[f"new_{c}"] - merged_df[f"default_{c}"]
+    fig = plot_comparisons(merged_df, "mod_how_str", diff)
+    fig.suptitle(
+        f"Compare different preprocessing steps on difference in {c} numeric scores",
+        fontsize=50,
+    )
+    path = f"plots/oai_mod/compare_sep_tokens_on_oai_mod_{git_hash()}"
+    if not os.path.exists(path):
+        os.mkdir(path)
+    fig.savefig(
+        f"{path}/{c.replace('/', '')}.png",
+        facecolor="w",
+        bbox_inches="tight",
+    )
+
 # %%
 # %%
 p = np.arange(0, 1, 0.05)
