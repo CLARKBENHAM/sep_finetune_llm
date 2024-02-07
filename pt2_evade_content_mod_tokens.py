@@ -590,7 +590,7 @@ def _write_where_missed_flagging(merged_df):
 # 133 strs only flagged by 1 sep, then ~30-40 work for 2-7 sep's
 # %%
 # compare the langauge where adding serperators mostly worked
-def print_missed_flag_by_lang_analysis(merged_df):
+def print_missed_flag_by_lang_analysis(merged_df, print_only_sig=True):
     missed_flag_ix = merged_df["new_any_flagged"] - merged_df["default_any_flagged"] < 0
     lang_default = merged_df["language"].value_counts()
     lang_missed_flag = merged_df["language"][missed_flag_ix].value_counts()
@@ -608,14 +608,20 @@ def print_missed_flag_by_lang_analysis(merged_df):
     sig_langs = {
         lan: d for lan, d in results.items() if d["p_value"] < 0.001 / len(lang_default.index)
     }
-    sig_langs_df = pd.DataFrame(sig_langs.values(), index=sig_langs.keys())
-    #sig_langs_df = pd.DataFrame(results.values(), index=results.keys())
+    # only sig or full
+    if print_only_sig:
+        sig_langs_df = pd.DataFrame(sig_langs.values(), index=sig_langs.keys())
+    else:
+        sig_langs_df = pd.DataFrame(results.values(), index=results.keys())
+        print("INFO: printing all languages")
     sig_langs_df["num_missed_flagged"] = lang_missed_flag[sig_langs_df.index]
     sig_langs_df["exp_num_missed_flagged"] = (
         exp_lang_missed_flag[sig_langs_df.index].round(0).astype(int)
     )
     sig_langs_df["per_of_flags_missed"] = lang_missed_flag[sig_langs_df.index] / lang_default[sig_langs_df.index]
-    with pd.option_context("display.float_format", "{:,.2e}".format):
+    with pd.option_context("display.float_format", "{:,.2e}".format, "display.max_columns", None, 'display.expand_frame_repr', False):
+        sig_langs_df["per_of_flags_missed"] = sig_langs_df["per_of_flags_missed"].apply(lambda x: "{:.1%}".format(x))
+        sig_langs_df["ratio_change"] = sig_langs_df["ratio_change"].apply(lambda x: "{:.2}".format(x))
         print(sig_langs_df.sort_values("p_value"))
     print(
         lang_default.loc[sig_langs.keys()] / lang_default.sum(),
@@ -623,14 +629,13 @@ def print_missed_flag_by_lang_analysis(merged_df):
     )
 
 
-print_missed_flag_by_lang_analysis(merged_df)
+print_missed_flag_by_lang_analysis(merged_df, print_only_sig=True)
 
 sep_is_192 = merged_df2["manipulation"].apply(lambda d: d["sep"] == chr(192))
 # spliting out don't see a real difference
-print_missed_flag_by_lang_analysis(merged_df2[~sep_is_192])
-print_missed_flag_by_lang_analysis(merged_df2[sep_is_192])
-print_missed_flag_by_lang_analysis(merged_df2)
-
+print_missed_flag_by_lang_analysis(merged_df2[~sep_is_192], print_only_sig=False)
+print_missed_flag_by_lang_analysis(merged_df2[sep_is_192], print_only_sig=False)
+print_missed_flag_by_lang_analysis(merged_df2, print_only_sig=False)
 # %%
 # %%
 # Make Plots
