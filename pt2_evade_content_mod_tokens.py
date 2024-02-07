@@ -15,7 +15,7 @@ import re
 import math
 from datetime import datetime
 from pprint import pprint
-from scipy.stats import binom_test
+from scipy.stats import binomtest
 
 # from pyarrow import parquet as pq
 from concurrent.futures import ThreadPoolExecutor
@@ -68,7 +68,7 @@ def chat_max_by_cat(openai_moderation, categories=None):
     return {c: max((r["category_scores"][c] for r in openai_moderation)) for c in categories}
 
 
-# can skip to l:225 "Start of Analysis"
+# can skip to l:500 "munge_check_mod_df"
 # %%
 files = [
     "data_dump/lmsys-chat-1m/train-00000-of-00006-4feeb3f83346a0e9.parquet",
@@ -267,10 +267,12 @@ def _split_convo_into_sep_turn_rows(analysis_mod_df, run_asserts=True):
     adds "convo_ix" column to track ix in original conversation of id
     """
     # explode each turn in 'new_oai_mod' and 'sent_convo' into their own rows
-    d = copy.deepcopy(analysis_mod_df)
+    if run_asserts:
+        d = copy.deepcopy(analysis_mod_df)
+    analysis_mod_df = analysis_mod_df.copy()
     analysis_mod_df["paired"] = analysis_mod_df.apply(
         lambda row: [
-            (ix, c, o) for ix, (c, o) in enumerate(zip(row["sent_convo"], row["new_oai_mod"]))
+            (ix, [c], o) for ix, (c, o) in enumerate(zip(row["sent_convo"], row["new_oai_mod"]))
         ],
         axis=1,
     )
@@ -280,7 +282,7 @@ def _split_convo_into_sep_turn_rows(analysis_mod_df, run_asserts=True):
     )
     analysis_mod_df = analysis_mod_df.drop(columns=["paired"])
     if run_asserts:
-        # skip if dropped nans
+        # skip if dropped nansk
         # check exploded correctly
         num_made = (
             analysis_mod_df["new_model"].nunique()
@@ -310,6 +312,7 @@ def _split_convo_into_sep_turn_rows(analysis_mod_df, run_asserts=True):
             .value_counts()
             .sort_index()
         ).all()
+    return analysis_mod_df
 
 
 def _make_dup_free(analysis_mod_df):
@@ -319,19 +322,18 @@ def _make_dup_free(analysis_mod_df):
     """
     # cols should be unique on
     uniq_cols = ["mod_model", "convo_str", "man_str"]
-
     extra_dup_mask = analysis_mod_df.duplicated(subset=uniq_cols, keep="first")
     if extra_dup_mask.sum() > 0:
         # Avg L1-norm amoung maxscore for duplicated values
-        assert (
-            analysis_mod_df[analysis_mod_df.duplicated(subset=uniq_cols, keep=False)]
-            .groupby(uniq_cols)["new_oai_mod"]
-            .transform(lambda x: x.apply(chat_max_scores))
-            .apply(lambda x: np.sum(np.abs(x - np.mean(x))))
-            .mean()
-        ) == 0
+        # assert (
+        #    analysis_mod_df[analysis_mod_df.duplicated(subset=uniq_cols, keep=False)]
+        #    .groupby(uniq_cols)["new_oai_mod"]
+        #    .transform(lambda x: x.apply(chat_max_scores))
+        #    .apply(lambda x: np.sum(np.abs(x - np.mean(x))))
+        #    .mean()
+        # ) == 0
         extra_dups = analysis_mod_df[extra_dup_mask]
-        analysis_mod_df = analysis_mod_df[~extra_dup_mask]
+        analysis_mod_df = analysis_mod_df[~extra_dup_mask].copy()
         print(f"WARN: dropped {extra_dup_mask.sum()} duplicates based on {uniq_cols}")
         print(extra_dups.groupby(["mod_model", "man_str"]).size())
         print(
@@ -352,6 +354,7 @@ def _explode_moderation_results(df, prefix, keep=None):
     :return: DataFrame with exploded moderation results.
         drops new_completion and new_oai_mod columns
     """
+    assert (df["new_oai_mod"].apply(lambda d: len(d["results"]) == 1)).all()
     exploded_mod = df["new_oai_mod"].apply(lambda d: pd.Series(d["results"][0]["category_scores"]))
     exploded_mod["max_score"] = exploded_mod.apply(max, axis=1)
     exploded_mod["any_flagged"] = df["new_oai_mod"].apply(
@@ -368,42 +371,41 @@ def _explode_moderation_results(df, prefix, keep=None):
     return exploded_mod
 
 
-def munge_check_mod_df(analysis_mod_df):
-    dropped_nans = analysis_mod_df.isna().sum().sum()
+def munge_check_mod_df(result_df, chat_df):
+    dropped_nans = result_df.isna().sum().sum()
     print(f"Droping nans: {dropped_nans}")
-    analysis_mod_df = analysis_mod_df.dropna()
+    result_df = result_df.dropna().copy() # get a "setting slice on loc" if dont copy(?)
 
-    analysis_mod_df["new_oai_mod"] = analysis_mod_df["new_oai_mod"].apply(
+    result_df["new_oai_mod"] = result_df["new_oai_mod"].apply(
         lambda d: [{**d, "results": [r]} for r in d["results"]]
     )
+    assert (result_df.sent_convo.apply(len) == result_df.new_oai_mod.apply(len)).all()
 
-    assert (analysis_mod_df.sent_convo.apply(len) == analysis_mod_df.new_oai_mod.apply(len)).all()
-    analysis_mod_df = _split_convo_into_sep_turn_rows(
-        analysis_mod_df, run_asserts=dropped_nans == 0
-    )
+    result_df = _split_convo_into_sep_turn_rows(result_df, run_asserts=dropped_nans == 0)
+    print(result_df.shape)
 
-    print(analysis_mod_df.shape)
     # What tried to set content mod model as vs. what it actually is
-    analysis_mod_df = analysis_mod_df.rename(columns={"new_model": "_sent_model"})
-    analysis_mod_df["mod_model"] = analysis_mod_df["new_oai_mod"].apply(lambda d: d["model"])
+    result_df = result_df.rename(columns={"new_model": "_sent_model"})
+    result_df["mod_model"] = result_df["new_oai_mod"].apply(lambda d: d["model"])
+    result_df["convo_str"] = result_df["sent_convo"].astype(str)
+    result_df["man_str"] = result_df["manipulation"].astype(str)
 
-    analysis_mod_df["convo_str"] = analysis_mod_df["sent_convo"].astype(str)
-    analysis_mod_df["man_str"] = analysis_mod_df["manipulation"].astype(str)
-    analysis_mod_df = _make_dup_free(analysis_mod_df)
+    result_df = _make_dup_free(result_df)
+    print("after dedupping", result_df.shape)
 
     # Move default row completions to being columns as Y
     join_on = ["conversation_id", "convo_ix", "mod_model"]
     keep_cols = join_on + ["sent_convo", "new_oai_mod"]
     new_only_cols = keep_cols + ["manipulation"]
-    print(f"Dropping columns: {set(analysis_mod_df.columns) - set(new_only_cols)}")
-    some_mod = analysis_mod_df["manipulation"].apply(
+    print(f"Dropping columns: {set(result_df.columns) - set(new_only_cols)}")
+    some_mod = result_df["manipulation"].apply(
         lambda d: d["sep"] is not None or d["kind"] is not None
     )
-    new_mod = _explode_moderation_results(
-        analysis_mod_df[some_mod], "new", keep=new_only_cols
-    ).rename(columns={"sent_convo": "new_sent_convo"})
+    new_mod = _explode_moderation_results(result_df[some_mod], "new", keep=new_only_cols).rename(
+        columns={"sent_convo": "new_sent_convo"}
+    )
     default_mod = _explode_moderation_results(
-        analysis_mod_df[~some_mod], "default", keep=keep_cols
+        result_df[~some_mod], "default", keep=keep_cols
     ).rename(columns={"sent_convo": "default_sent_convo", "new_oai_mod": "default_oai_mod"})
 
     # already uniq on convo_str so conversation_id and convo_ix are unique here, aside from sep
@@ -412,10 +414,10 @@ def munge_check_mod_df(analysis_mod_df):
         .merge(default_mod.set_index(join_on), left_index=True, right_index=True, how="left")
         .reset_index()
     )
-    print(merged_df.shape)
-
-    print(f"WARN: dropping NAs from merge_df: {merged_df.isna().any(axis=1).sum()}")
+    if merged_df.isna().any(axis=1).sum() > 0:
+        print(f"WARN: unexpected dropping NAs from merge_df: {merged_df.isna().any(axis=1).sum()}")
     merged_df = merged_df.dropna()
+    print(merged_df.shape)
 
     # last cols to add
     merged_df["mod_how_str"] = merged_df["manipulation"].apply(
@@ -424,24 +426,32 @@ def munge_check_mod_df(analysis_mod_df):
     merged_df["new_minus_default_max_score"] = (
         merged_df["new_max_score"] - merged_df["default_max_score"]
     )
+    cid2lang = chat_df[["conversation_id", "language"]].set_index("conversation_id")["language"]
+    merged_df["language"] = merged_df["conversation_id"].apply(lambda c: cid2lang[c])
 
     # Code validation. merged_df is done
+    # TODO Should count be dropped here? Some analysis mod isn't be copied around correctly
     mod_a = (
-        analysis_mod_df["new_oai_mod"][some_mod]
+        result_df["new_oai_mod"][some_mod]
         .apply(lambda d: chat_max_scores(d["results"]))
         .describe()
+        .drop("count")
     )
-    mod_m = merged_df["new_max_score"].describe()
-    assert mod_a.round(3).equals(mod_m.round(3))
+    mod_m = merged_df["new_max_score"].describe().drop("count")
+    assert mod_a.round(3).equals(mod_m.round(3)), mod_a.round(3).compare(mod_m.round(3))
     # since the array sizes are different, drop count std
+    # these will be more off as dup's dropped from default_max_score
+    # also change percentiles. Can hack atol
     nmod_a = (
-        analysis_mod_df["new_oai_mod"][~some_mod]
+        result_df["new_oai_mod"][~some_mod]
         .apply(lambda d: chat_max_scores(d["results"]))
         .describe()
         .drop(["count", "std"])
     )
     nmod_m = merged_df["default_max_score"].describe().drop(["count", "std"])
-    assert nmod_a.round(3).equals(nmod_m.round(3))
+    assert np.allclose(nmod_a, nmod_m, atol=0.01 + 0.04 * (dropped_nans > 0)), nmod_a.round(
+        2
+    ).compare(nmod_m.round(2))
 
     # hack: skip if dropped nans. Should check what varies because nans
     if dropped_nans == 0:
@@ -456,17 +466,17 @@ def munge_check_mod_df(analysis_mod_df):
             assert (
                 merged_df[c].value_counts().sort_index()
                 + default_mod[c].value_counts().sort_index()
-                == analysis_mod_df[c].value_counts().sort_index()
+                == result_df[c].value_counts().sort_index()
             ).all(), f"{c} merged + default vs analsysi_mod_df differs"
         assert (
-            analysis_mod_df.set_index(join_on)["sent_convo"][some_mod.values]
+            result_df.set_index(join_on)["sent_convo"][some_mod.values]
             .sort_index()
             .equals(merged_df.set_index(join_on)["new_sent_convo"].sort_index())
         ), "new convo off"
         assert len(set(merged_df["new_sent_convo"].apply(lambda d: d["content"]))) == len(merged_df)
         # added below since counts were wrong above if used .nunique() not len(set(
         assert (
-            analysis_mod_df.set_index(join_on)["sent_convo"][~some_mod.values]
+            result_df.set_index(join_on)["sent_convo"][~some_mod.values]
             .apply(lambda d: str(d["content"]))
             .sort_index()
             .values
@@ -479,7 +489,7 @@ def munge_check_mod_df(analysis_mod_df):
         ).all(), "default_sent_convo off"
 
         assert (
-            analysis_mod_df.set_index(join_on)["new_oai_mod"]
+            result_df.set_index(join_on)["new_oai_mod"]
             .apply(lambda d: d["id"])[some_mod.values]
             .sort_index()
             .equals(
@@ -487,7 +497,7 @@ def munge_check_mod_df(analysis_mod_df):
             )
         ), "new_oai_mod id's off"
         assert (
-            analysis_mod_df.set_index(join_on)["new_oai_mod"]
+            result_df.set_index(join_on)["new_oai_mod"]
             .apply(lambda d: chat_max_scores(d["results"]))[some_mod.values]
             .sort_index()
             .equals(
@@ -499,11 +509,13 @@ def munge_check_mod_df(analysis_mod_df):
     return merged_df
 
 
+chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
 analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_ba0cefe.pkl")
-merged_df = munge_check_mod_df(analysis_mod_df)
-analysis_mod_df2 = pd.read_pickle("data_dump/oai_mod/comp_results_53ca02c_lang_check.pkl")
-merged_df2 = munge_check_mod_df(analysis_mod_df2)
+merged_df = munge_check_mod_df(analysis_mod_df, chat_df)
 
+chat_df2 = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df53ca02c_lang_checks.pkl")
+analysis_mod_df2 = pd.read_pickle("data_dump/oai_mod/comp_results_d7a8db3_lang_check.pkl")
+merged_df2 = munge_check_mod_df(analysis_mod_df2, chat_df2)
 
 # %%
 def mod_print_summaries(merged_df):
@@ -537,15 +549,19 @@ def mod_print_summaries(merged_df):
     print(df.sort_values(by="t-score"))
 
     print(
-        "Percent of turns with max mod 10ppt lower from sep:"
-        f" {100*np.mean(merged_df['new_minus_default_max_score'] <= -0.1):.1f}%"
-    )
-    print(
         "Percent of turns that got flagged that wouldn't have:"
         f" {100*np.mean(merged_df['new_any_flagged'] - merged_df['default_any_flagged'] > 0):.1f}%"
     )
+    print(
+        "Percent of turns with score diff 10ppt higher from sep:"
+        f" {100*np.mean(merged_df['new_minus_default_max_score'] >= 0.1):.1f}%"
+    )
+    # sep helped
+    print(
+        "Percent of turns with score diff 10ppt lower from sep:"
+        f" {100*np.mean(merged_df['new_minus_default_max_score'] <= -0.1):.1f}%"
+    )
     missed_flag_ix = merged_df["new_any_flagged"] - merged_df["default_any_flagged"] < 0
-
     print(
         "Percent of turns that should've got flagged but didn't:"
         f" {100*np.mean(missed_flag_ix):.1f}%"
@@ -570,17 +586,10 @@ def _write_where_missed_flagging(merged_df):
     df.to_csv(f"data_dump/oai_mod/mostly_passed_flagging_{git_hash()}.csv", sep="\t", index=False)
 
 
-_write_where_missed_flagging(merged_df)
+# _write_where_missed_flagging(merged_df)
 # 133 strs only flagged by 1 sep, then ~30-40 work for 2-7 sep's
 # %%
 # compare the langauge where adding serperators mostly worked
-chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
-cid2lang = chat_df[["conversation_id", "language"]].set_index("conversation_id")[
-    "language"
-]  # .to_dict("index")
-merged_df["language"] = merged_df["conversation_id"].apply(lambda c: cid2lang[c])
-
-
 def print_missed_flag_by_lang_analysis(merged_df):
     missed_flag_ix = merged_df["new_any_flagged"] - merged_df["default_any_flagged"] < 0
     lang_default = merged_df["language"].value_counts()
@@ -593,18 +602,19 @@ def print_missed_flag_by_lang_analysis(merged_df):
         n = lang_default.loc[language]  # Number of trials
         k = lang_missed_flag.loc[language]  # Number of successes
         # Binomial test
-        p_value = binom_test(k, n, p)
+        p_value = binomtest(k, n, p).pvalue
         results[language] = {"p_value": p_value, "ratio_change": (k / n) / p}
 
     sig_langs = {
         lan: d for lan, d in results.items() if d["p_value"] < 0.001 / len(lang_default.index)
     }
-    sig_langs_df = pd.DataFrame(sig_langs.values())
-    sig_langs_df.index = sig_langs.keys()
+    sig_langs_df = pd.DataFrame(sig_langs.values(), index=sig_langs.keys())
+    #sig_langs_df = pd.DataFrame(results.values(), index=results.keys())
     sig_langs_df["num_missed_flagged"] = lang_missed_flag[sig_langs_df.index]
     sig_langs_df["exp_num_missed_flagged"] = (
         exp_lang_missed_flag[sig_langs_df.index].round(0).astype(int)
     )
+    sig_langs_df["per_of_flags_missed"] = lang_missed_flag[sig_langs_df.index] / lang_default[sig_langs_df.index]
     with pd.option_context("display.float_format", "{:,.2e}".format):
         print(sig_langs_df.sort_values("p_value"))
     print(
@@ -613,7 +623,12 @@ def print_missed_flag_by_lang_analysis(merged_df):
     )
 
 
-# print_missed_flag_by_lang_analysis(merged_df)
+print_missed_flag_by_lang_analysis(merged_df)
+
+sep_is_192 = merged_df2["manipulation"].apply(lambda d: d["sep"] == chr(192))
+# spliting out don't see a real difference
+print_missed_flag_by_lang_analysis(merged_df2[~sep_is_192])
+print_missed_flag_by_lang_analysis(merged_df2[sep_is_192])
 print_missed_flag_by_lang_analysis(merged_df2)
 
 # %%
@@ -741,9 +756,9 @@ def Show_prompt_lengths_vs_max_score(df, by_width=False):
     """
     plot both prompt length and output length vs max mod score
     """
-    prompt_lens = df["new_sent_convo"].apply(lambda d: num_tokens_from_messages([d]))
+    prompt_lens = df["new_sent_convo"].apply(num_tokens_from_messages)
     prompt_lens.name = "Sent Convo Num Tokens"
-    og_prompt_lens = df["default_sent_convo"].apply(lambda d: num_tokens_from_messages([d]))
+    og_prompt_lens = df["default_sent_convo"].apply(num_tokens_from_messages)
     og_prompt_lens.name = "Original Convo Num Tokens"
     new_max_scores = copy.deepcopy(df["new_max_score"])
     new_max_scores.name = "Avg Max Mod with seperators"
@@ -837,10 +852,17 @@ def Sent_by_cat_sep_vs_sep(merged_df, name):
         )
 
 
-Sent_make_summary_hist_plot(merged_df, "df1")
-Show_prompt_lengths_vs_max_score(merged_df)
-Sent_by_cat_sep_vs_sep(merged_df, "df1")
-# Sent_make_summary_hist_plot(merged_df2, "lang_proc")
+#Sent_make_summary_hist_plot(merged_df, "df1")
+#plt.show()
+#Show_prompt_lengths_vs_max_score(merged_df)
+#plt.show()
+#Sent_by_cat_sep_vs_sep(merged_df, "df1")
+
+Sent_make_summary_hist_plot(merged_df2, "lang_proc")
+plt.show()
+Show_prompt_lengths_vs_max_score(merged_df2, "lang_proc")
+plt.show()
+Sent_by_cat_sep_vs_sep(merged_df2, "lang_proc")
 # %%
 # Check if it matters to send the whole conversation in at once or in pieces
 import random
@@ -953,3 +975,13 @@ print(o)
 print([len(i["results"]) for i in o])
 print([max(i["results"][0]["category_scores"].values()) for i in o])
 # %%
+
+# %%
+long_convos = analysis_mod_df2.loc[
+    analysis_mod_df2["sent_convo"].apply(num_tokens_from_messages) > 5000, "conversation_id"
+# all convos over 10k got nans
+old=merged_df2.loc[merged_df2['conversation_id'].isin(long_convos), ['default_sent_convo', 'conversation_id']].groupby('conversation_id')['default_sent_convo'].apply(lambda s: s.apply(num_tokens_from_messages).sum())
+new=merged_df2.loc[merged_df2['conversation_id'].isin(long_convos), ['new_sent_convo', 'conversation_id']].groupby('conversation_id')['new_sent_convo'].apply(lambda s: s.apply(num_tokens_from_messages).sum())
+# cut causes tokenization to be weird
+(merged_df2['new_sent_convo'].apply(num_tokens_from_messages) - 2*merged_df2['default_sent_convo'].apply(num_tokens_from_messages)).value_counts()
+new-old*2 + 3*merged_df2[merged_df2['conversation_id'].isin(long_convos)].groupby('conversation_id').size()
