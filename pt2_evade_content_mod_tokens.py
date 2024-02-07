@@ -16,6 +16,7 @@ import math
 from datetime import datetime
 from pprint import pprint
 from scipy.stats import binomtest
+from scipy.spatial.distance import cosine
 
 # from pyarrow import parquet as pq
 from concurrent.futures import ThreadPoolExecutor
@@ -68,8 +69,9 @@ def chat_max_by_cat(openai_moderation, categories=None):
     return {c: max((r["category_scores"][c] for r in openai_moderation)) for c in categories}
 
 
-# can skip to l:500 "munge_check_mod_df"
+# can skip to l:525 "merge_df" for analysis section, will need make_
 # %%
+# can skip
 files = [
     "data_dump/lmsys-chat-1m/train-00000-of-00006-4feeb3f83346a0e9.parquet",
     "data_dump/lmsys-chat-1m/train-00001-of-00006-4030672591c2f478.parquet",
@@ -99,9 +101,9 @@ chat_df2.to_pickle(f"data_dump/oai_mod/comparison_base_df{git_hash()}_lang_check
 
 del all_chat_df
 gc.collect()
+#%% Define functions
 
 
-# %%
 def make_results_frame(
     final_chat_df,
     ord_vals=ORD_USE_BETWEEN + [None],
@@ -136,17 +138,6 @@ def make_results_frame(
         new_dfs += [_r_df]
     return pd.concat(new_dfs)
 
-
-chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
-check_mod_df = pd.concat([
-    # make_results_frame(chat_df, model="text-moderation-007"),
-    make_results_frame(chat_df, model="text-moderation-latest"),
-])  # only *-latest model works with current package
-check_mod_df2 = pd.concat([
-    make_results_frame(chat_df2, ord_vals=[192, 8, None], model="text-moderation-latest"),
-])
-
-
 def cut(check_mod_df):
     MAX_MOD_ITEMS = 32
     MAX_TURN_TOKENS = 4096  # not sure if real limitation
@@ -168,18 +159,6 @@ def cut(check_mod_df):
         )
     )
     return check_mod_df
-
-
-check_mod_df = cut(check_mod_df)
-check_mod_df2 = cut(check_mod_df2)
-# check_mod_df.to_pickle(f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}.pkl")
-# print(check_mod_df["sent_convo"].apply(num_tokens_from_messages).describe())
-check_mod_df2.to_pickle(
-    f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}_lang_checks.pkl"
-)
-print(check_mod_df2["sent_convo"].apply(num_tokens_from_messages).describe())
-# %%
-# WARN: makes requests
 
 
 def _make_mod_request(mod_in, model):
@@ -245,15 +224,37 @@ def make_async_reqs(df, max_workers=4, fn=make_mod_requests):
         out = list(executor.map(req_progress, args))
     return out
 
+# %%
+chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
+check_mod_df = pd.concat([
+    # make_results_frame(chat_df, model="text-moderation-007"),
+    make_results_frame(chat_df, model="text-moderation-latest"),
+])  # only *-latest model works with current package
+check_mod_df2 = pd.concat([
+    make_results_frame(chat_df2, ord_vals=[192, 8, None], model="text-moderation-latest"),
+])
+
+#%%
+check_mod_df = cut(check_mod_df)
+check_mod_df2 = cut(check_mod_df2)
+# check_mod_df.to_pickle(f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}.pkl")
+# print(check_mod_df["sent_convo"].apply(num_tokens_from_messages).describe())
+check_mod_df2.to_pickle(
+    f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}_lang_checks.pkl"
+)
+print(check_mod_df2["sent_convo"].apply(num_tokens_from_messages).describe())
+# %%
+# WARN: makes requests
 
 # d=copy.deepcopy(check_mod_df2.head(50))
 check_mod_df2["new_oai_mod"] = make_async_reqs(check_mod_df2, max_workers=5)
 check_mod_df2.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_lang_check.pkl")
 check_mod_df2["new_oai_mod"] = make_async_reqs(check_mod_df2, max_workers=2)
 check_mod_df2.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_lang_check.pkl")
-check_mod_df2["new_oai_mod"] = make_async_reqs(check_mod_df2, max_workers=1)
-check_mod_df2.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_lang_check.pkl")
-# %%
+# didn't get anything new
+#check_mod_df2["new_oai_mod"] = make_async_reqs(check_mod_df2, max_workers=1)
+#check_mod_df2.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_lang_check.pkl")
+
 check_mod_df = pd.read_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_full.pkl")
 check_mod_df["new_oai_mod"] = make_async_reqs(check_mod_df, max_workers=4)
 check_mod_df.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_full.pkl")
@@ -516,8 +517,36 @@ merged_df = munge_check_mod_df(analysis_mod_df, chat_df)
 chat_df2 = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df53ca02c_lang_checks.pkl")
 analysis_mod_df2 = pd.read_pickle("data_dump/oai_mod/comp_results_d7a8db3_lang_check.pkl")
 merged_df2 = munge_check_mod_df(analysis_mod_df2, chat_df2)
+#%%
+import openai
+import backoff
+embeding_model="text-embedding-3-large"
+@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=8)
+def get_embeddings(r,embeding_model=embeding_model):
+    assert len(r) == 1, r
+    r=r[0]['content']
+    return client.embeddings.create(
+        model=embeding_model,
+        input=r,
+        encoding_format="float"
+    )
+
+
+merged_df['new_embedding'] = make_async_reqs(merged_df, max_workers=10, fn=lambda r: get_embeddings(r['new_sent_convo']).data[0].embedding)
+merged_df['default_embedding'] = make_async_reqs(merged_df, max_workers=10, fn=lambda r: get_embeddings(r['default_sent_convo']).data[0].embedding)
+merged_df2['new_embedding'] = make_async_reqs(merged_df2, max_workers=10, fn=lambda r: get_embeddings(r['new_sent_convo']).data[0].embedding)
+merged_df2['default_embedding'] = make_async_reqs(merged_df2, max_workers=10, fn=lambda r: get_embeddings(r['default_sent_convo']).data[0].embedding)
+
+merged_df['new_default_cos_sim'] = merged_df.apply(lambda r: cosine(r['new_embedding'], r['default_embedding']),axis=1)
+merged_df2['new_default_cos_sim'] = merged_df2.apply(lambda r: cosine(r['new_embedding'], r['default_embedding']),axis=1)
+
+merged_df.to_pickle(f"data_dump/oai_mod/merged_df_{git_hash()}.pkl")
+merged_df2.to_pickle(f"data_dump/oai_mod/merged_df_{git_hash()}_lang_checks.pkl")
 
 # %%
+merged_df =pd.read_pickle("data_dump/oai_mod/merged_df_8b6b0fe.pkl")
+merged_df2 =pd.read_pickle("data_dump/oai_mod/merged_df_8b6b0fe_lang_checks.pkl")
+
 def mod_print_summaries(merged_df):
     print(merged_df["new_max_score"].describe(), merged_df["default_max_score"].describe())
     print(
@@ -637,7 +666,6 @@ print_missed_flag_by_lang_analysis(merged_df2[~sep_is_192], print_only_sig=False
 print_missed_flag_by_lang_analysis(merged_df2[sep_is_192], print_only_sig=False)
 print_missed_flag_by_lang_analysis(merged_df2, print_only_sig=False)
 # %%
-# %%
 # Make Plots
 from scipy.stats import ks_2samp
 import scipy.stats as stats
@@ -667,25 +695,25 @@ def get_name(d, n, default=""):
     return n
 
 
-def _ks_hist_plot(data1, data2, col1=None, col2=None, ax=None, sig_level=0.05):
+def _ks_hist_plot(data1, data2, name1=None, name2=None, ax=None, sig_level=0.05):
     if ax is None:
         fig, ax = plt.subplots()
 
-    col1, col2 = get_name(data1, col1, "1"), get_name(data2, col2, "2")
+    name1, name2 = get_name(data1, name1, "1"), get_name(data2, name2, "2")
     ax.hist(
         data1,
-        color=str_to_color(col1),
+        color=str_to_color(name1),
         alpha=0.5,
-        label=col1 + f" m: {data1.mean():.3f} sem: {data1.sem():.3f}",
+        label=name1 + f" m: {data1.mean():.3f} sem: {data1.sem():.3f}",
     )
     ax.hist(
         data2,
-        color=str_to_color(col2),
+        color=str_to_color(name2),
         alpha=0.5,
-        label=col2 + f" m: {data2.mean():.3f} sem: {data2.sem():.3f}",
+        label=name2 + f" m: {data2.mean():.3f} sem: {data2.sem():.3f}",
     )
     statistic, p_value = ks_2samp(data1.dropna(), data2.dropna(), alternative="two-sided")
-    title = f"{col1} vs {col2}"
+    title = f"{name1} vs {name2}"
     title += f"\nKS Statistic: {statistic:.3f}, P-Value: {p_value:.3f}"
     color = "red" if p_value < sig_level else "black"
     ax.set_title(title, color=color)
@@ -697,10 +725,10 @@ def Sent_make_summary_hist_plot(merged_df, name):
     data1 = merged_df["new_max_score"]
     data2 = merged_df["default_max_score"]
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax = _ks_hist_plot(data1, data2, col1="with seperators", col2="w/o seperators", ax=ax)
+    ax = _ks_hist_plot(data1, data2, name1="with seperators", name2="w/o seperators", ax=ax)
     fig.suptitle(f"{', '.join(merged_df['mod_model'].unique())} Max Category Score per Message")
     fig.subplots_adjust(top=0.86)
-    fig.savefig(f"plots/oai_mod/average_max_scores_yn_seperators_{git_hash()}_{name}.png")
+    fig.savefig(f"plots/oai_mod/average_max_scores_yn_seperators_{git_hash()}_{name}.png", facecolor="w")
 
 
 def reg_plot(
@@ -709,13 +737,14 @@ def reg_plot(
     x_name=None,
     y_name=None,
     title=None,
+    ax=None
 ):
     x_name, y_name = get_name(x1, x_name, "X"), get_name(y1, y_name, "Y")
     if title is None:
         title = f"{y_name} vs {x_name}"
 
     ax = sns.regplot(
-        x=x1, y=y1, scatter=True, ci=95, line_kws={"color": "red"}, scatter_kws={"s": 2}
+        x=x1, y=y1, scatter=True, ci=95, line_kws={"color": "red"}, scatter_kws={"s": 2},ax=ax
     )
     ax.set_title(title)
     ax.set_ylabel(y_name)
@@ -748,7 +777,7 @@ def avg_by_bucket(X, Y, x_name=None, y_name=None, ax=None, by_width=False):
     ax.bar(range(len(bucket_means)), bucket_means, color=str_to_color(y_name))
     ax.set_xticks(
         range(len(bucket_means)),
-        [f"{interval.mid:.0f}" for interval in bucket_means.index],
+        [f"{interval.mid:.2f}" for interval in bucket_means.index],
         rotation=90,
     )
     ax.set_xlabel(x_name)
@@ -777,9 +806,12 @@ def Show_prompt_lengths_vs_max_score(df, by_width=False):
 
     # Average mod by prompt len
     ax = avg_by_bucket(prompt_lens, score_diff, by_width=by_width)
+    by_str = 'num_tokens' if by_width else 'num_tokens quantile'
+    ax.set_title(f"Sent Prompt Lengths vs Score Difference grouped by {by_str} ")
     plt.show()
 
     ax = avg_by_bucket(og_prompt_lens, score_diff, by_width=by_width)
+    ax.set_title(f"Original Prompt Lengths vs Score Difference grouped by {by_str} ")
     plt.show()
 
 
@@ -812,7 +844,7 @@ def plot_comparisons(df, cat_col, scores, comparison_type="categorical", sig_lev
                     # Comparing scores across different columns
                     data1 = scores
                     data2 = scores
-                _ks_hist_plot(data1, data2, col1=cat1, col2=cat2, ax=ax, sig_level=sig_level)
+                _ks_hist_plot(data1, data2, name1=cat1, name2=cat2, ax=ax, sig_level=sig_level)
             else:
                 ax.set_visible(False)
 
@@ -855,19 +887,114 @@ def Sent_by_cat_sep_vs_sep(merged_df, name):
             facecolor="w",
             bbox_inches="tight",
         )
-
-
-#Sent_make_summary_hist_plot(merged_df, "df1")
-#plt.show()
-#Show_prompt_lengths_vs_max_score(merged_df)
-#plt.show()
-#Sent_by_cat_sep_vs_sep(merged_df, "df1")
+#%%
+Sent_make_summary_hist_plot(merged_df, "df1")
+plt.show()
+Show_prompt_lengths_vs_max_score(merged_df, by_width=False)
+plt.show()
+Sent_by_cat_sep_vs_sep(merged_df, "df1")
 
 Sent_make_summary_hist_plot(merged_df2, "lang_proc")
 plt.show()
-Show_prompt_lengths_vs_max_score(merged_df2, "lang_proc")
+Show_prompt_lengths_vs_max_score(merged_df2, "lang_proc",by_width=False)
 plt.show()
 Sent_by_cat_sep_vs_sep(merged_df2, "lang_proc")
+
+
+#%%
+# see if embeddings different
+def plot_bucket_cosine_sim(merged_df, name, nrows=50):
+    sorted_df = merged_df.sort_values(by='new_minus_default_max_score', key=np.abs)
+    big_cos = sorted_df.iloc[-nrows:]['new_default_cos_sim']
+    small_cos = sorted_df.iloc[:nrows]['new_default_cos_sim']
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    _ks_hist_plot(small_cos, big_cos,
+        name1=f"cosine dist of {nrows} smallest abs(new - default)",
+        name2=f"cosine dist of {nrows} largest abs(new - default)",
+        ax=ax
+    )
+    fig.suptitle(f"Does adding seperaters change embedding for {name}?")
+    fig.subplots_adjust(top=0.86)
+    fig.tight_layout()
+    fig.savefig(f"plots/oai_mod/embedding_cos_dist_ks_hist_{git_hash()}_{name}.png",facecolor="w")
+    fig.show()
+    #plt.close(fig)
+
+def reg_cosine_sim(merged_df, name):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    reg_plot(
+        merged_df['new_default_cos_sim'],
+        merged_df['new_minus_default_max_score'],
+        x_name="Embedding cosine similarity between turn w/ and w/o sep token",
+        y_name="Avg Max Mod with seperators - w/o seperators",
+        title=f"Embeding by {embeding_model} vs Max Mod score difference for {name}",
+    )
+    fig.tight_layout()
+    fig.savefig(f"plots/oai_mod/embedding_cos_dist_reg_{git_hash()}_{name}.png",facecolor="w")
+    fig.show()
+
+def show_reg_plot_cos_sim_by_group_avg(merged_df, name):
+    x_name='new_default_cos_sim'
+    y_name='new_minus_default_max_score'
+    df=merged_df.groupby(['language', 'mod_how_str'])[[x_name, y_name]].mean().sort_values('new_default_cos_sim')
+    df.reset_index(inplace=True)
+    plt.figure(figsize=(10, 8))
+    sns.regplot(x=x_name, y=y_name, data=df, fit_reg=True)
+
+    # Add labels
+    for i in range(df.shape[0]):
+        plt.text(df.loc[i, 'new_default_cos_sim'],
+                 df.loc[i, 'new_minus_default_max_score'],
+                 f"{df.loc[i, 'language']}-{df.loc[i, 'mod_how_str']}",
+                 horizontalalignment='left',
+                 size='medium' if len(df) < 20 else 'small', color='black', weight='semibold' if len(df) < 10 else 'light')
+
+    corr, p = stats.pearsonr(df[x_name], df[y_name])
+    plt.text(
+        0.75,
+        1.1,
+        f"corr: {corr:.2f} p: {p:.2f}",
+        horizontalalignment="left",
+        verticalalignment="top",
+        transform=ax.transAxes,
+    )
+    plt.xlabel('Mean New Default Cosine Similarity')
+    plt.ylabel('Mean New Minus Default Max Score')
+    plt.title(f'Regression Plot with Group Averages for {name}')
+    plt.show()
+
+
+
+plot_bucket_cosine_sim(merged_df, "df1", nrows=50)
+reg_cosine_sim(merged_df, "df1")
+show_reg_plot_cos_sim_by_group_avg(merged_df, 'df1')
+
+plot_bucket_cosine_sim(merged_df2, "lang_checks", nrows=50)
+reg_cosine_sim(merged_df2, "lang_checks")
+show_reg_plot_cos_sim_by_group_avg(merged_df2, 'lang_checks')
+#%%
+embedding_sim = pd.concat([df['new_default_cos_sim'] for df in (merged_df, merged_df2) ])
+score_diff = pd.concat([df['new_minus_default_max_score'] for df in (merged_df, merged_df2) ])
+
+ax = avg_by_bucket(embedding_sim, score_diff, by_width=True) # xaxis 0 rounded by default
+ax.set_title(f"Total embedding correlation similarity vs score diff by bucket_size")
+plt.show()
+
+ax = avg_by_bucket(embedding_sim, score_diff, by_width=False)
+ax.set_title(f"Total embedding correlation similarity vs score diff by quantile")
+plt.show()
+
+print('Average Cosine Similarity by langauge\n',
+      merged_df.groupby(['language'])[['new_default_cos_sim', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_sim'), #agg(['mean', 'sem']),
+      merged_df2.groupby(['language'])[['new_default_cos_sim', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_sim'), #agg(['mean', 'sem']),
+    )
+
+print('Average Cosine Similarity by langauge and mod_how_str',
+      merged_df.groupby(['language', 'mod_how_str'])[['new_default_cos_sim', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_sim'), #agg(['mean', 'sem']),
+      merged_df2.groupby(['language', 'mod_how_str'])[['new_default_cos_sim', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_sim'), #agg(['mean', 'sem']),
+    )
+
 # %%
 # Check if it matters to send the whole conversation in at once or in pieces
 import random
@@ -931,7 +1058,7 @@ fig, ax = plt.subplots(figsize=(7, 5))
 _ks_hist_plot(data1[gt_800_tokens], data2[gt_800_tokens], ax=ax)
 fig.suptitle(f"Original convo turn was >{i} tokens")
 fig.subplots_adjust(top=0.86)
-fig.savefig(f"plots/oai_mod/average_max_scores_yn_seperators_{git_hash()}_gt_800.png")
+fig.savefig(f"plots/oai_mod/average_max_scores_yn_seperators_{git_hash()}_gt_800.png", facecolor="w")
 # %%
 # Longest prompts have bigger difference
 data1 = merged_df["new_max_score"]
@@ -943,7 +1070,7 @@ fig, ax = plt.subplots(figsize=(7, 5))
 _ks_hist_plot(data1[gt_800_tokens], data2[gt_800_tokens], ax=ax)
 fig.suptitle(f"Original convo turn was >{i} tokens")
 fig.subplots_adjust(top=0.86)
-fig.savefig(f"plots/oai_mod/average_max_scores_yn_seperators_{git_hash()}_gt_800.png")
+fig.savefig(f"plots/oai_mod/average_max_scores_yn_seperators_{git_hash()}_gt_800.png",facecolor="w")
 # %%
 # %% Random Scrap
 p = np.arange(0, 1, 0.05)
