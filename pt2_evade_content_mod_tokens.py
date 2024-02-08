@@ -17,6 +17,8 @@ from datetime import datetime
 from pprint import pprint
 from scipy.stats import binomtest
 from scipy.spatial.distance import cosine
+import openai
+import backoff
 
 # from pyarrow import parquet as pq
 from concurrent.futures import ThreadPoolExecutor
@@ -88,16 +90,22 @@ all_chat_df = all_chat_df.sort_values(
 ).reset_index(drop=True)
 
 chat_df = all_chat_df.head(1000)
-chat_df.to_pickle(f"data_dump/oai_mod/comparison_base_df{git_hash()}.pkl")
+#chat_df.to_pickle(f"data_dump/oai_mod/comparison_base_df{git_hash()}.pkl")
 
 check_langs = ["Portuguese", "French", "unknown", "Russian"]
 chat_df2 = all_chat_df.iloc[1000:]
 chat_df2 = chat_df2[chat_df2["language"].isin(check_langs)]
 # Get the top 100 entries for each language
 chat_df2 = (
-    chat_df2.groupby("language").apply(lambda x: x.head(100)).reset_index(drop=True)["language"]
+    chat_df2.groupby("language").apply(lambda x: x.head(100)).reset_index(drop=True)
 )
 chat_df2.to_pickle(f"data_dump/oai_mod/comparison_base_df{git_hash()}_lang_checks.pkl")
+
+# from not already used; will run 500 convos then compare at mod scores top 10% of turns by embedding cos dist
+# only running through all 500 convos to keep code the same
+chat_df3 = all_chat_df.iloc[1000:]
+chat_df3 = chat_df3[~chat_df3['conversation_id'].isin(chat_df2['conversation_id'])].iloc[:500]
+chat_df3.to_pickle(f"data_dump/oai_mod/_temp_comparison_base_df{git_hash()}_base3.pkl")
 
 del all_chat_df
 gc.collect()
@@ -208,6 +216,18 @@ def make_mod_requests(r):
         return out
 
 
+embeding_model="text-embedding-3-large"
+@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=8)
+def get_embeddings(r,embeding_model=embeding_model):
+    assert len(r) == 1, r
+    r=r[0]['content']
+    return client.embeddings.create(
+        model=embeding_model,
+        input=r,
+        encoding_format="float"
+    )
+
+
 def make_async_reqs(df, max_workers=4, fn=make_mod_requests):
     total = len(df)
     args = [(index, total, r) for index, r in enumerate(df.to_dict("records"))]
@@ -216,7 +236,7 @@ def make_async_reqs(df, max_workers=4, fn=make_mod_requests):
         index, total, r = args
         out = fn(r)
         if total > 25 and index % (total // 25) == 0:
-            print(f"Progress: {index / total * 100:.2f}% {datetime.now()}\n")
+            print(f"Progress: {index / total * 100:.1f}% {datetime.now()}\n")
         return out
 
     print(f"Starting: {datetime.now()}\n")
@@ -237,16 +257,19 @@ check_mod_df2 = pd.concat([
 #%%
 check_mod_df = cut(check_mod_df)
 check_mod_df2 = cut(check_mod_df2)
-# check_mod_df.to_pickle(f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}.pkl")
-# print(check_mod_df["sent_convo"].apply(num_tokens_from_messages).describe())
+check_mod_df.to_pickle(f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}.pkl")
+print(check_mod_df["sent_convo"].apply(num_tokens_from_messages).describe())
 check_mod_df2.to_pickle(
     f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}_lang_checks.pkl"
 )
 print(check_mod_df2["sent_convo"].apply(num_tokens_from_messages).describe())
+
 # %%
 # WARN: makes requests
+check_mod_df = pd.read_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_full.pkl")
+check_mod_df["new_oai_mod"] = make_async_reqs(check_mod_df, max_workers=4)
+check_mod_df.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_full.pkl")
 
-# d=copy.deepcopy(check_mod_df2.head(50))
 check_mod_df2["new_oai_mod"] = make_async_reqs(check_mod_df2, max_workers=5)
 check_mod_df2.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_lang_check.pkl")
 check_mod_df2["new_oai_mod"] = make_async_reqs(check_mod_df2, max_workers=2)
@@ -254,11 +277,6 @@ check_mod_df2.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_lang_check
 # didn't get anything new
 #check_mod_df2["new_oai_mod"] = make_async_reqs(check_mod_df2, max_workers=1)
 #check_mod_df2.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_lang_check.pkl")
-
-check_mod_df = pd.read_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_full.pkl")
-check_mod_df["new_oai_mod"] = make_async_reqs(check_mod_df, max_workers=4)
-check_mod_df.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_full.pkl")
-
 
 # %%
 # Start of Analysis
@@ -509,7 +527,7 @@ def munge_check_mod_df(result_df, chat_df):
         ), "oai_mod max scores off"
     return merged_df
 
-
+#%%
 chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
 analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_ba0cefe.pkl")
 merged_df = munge_check_mod_df(analysis_mod_df, chat_df)
@@ -518,34 +536,24 @@ chat_df2 = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df53ca02c_lang_che
 analysis_mod_df2 = pd.read_pickle("data_dump/oai_mod/comp_results_d7a8db3_lang_check.pkl")
 merged_df2 = munge_check_mod_df(analysis_mod_df2, chat_df2)
 #%%
-import openai
-import backoff
-embeding_model="text-embedding-3-large"
-@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=8)
-def get_embeddings(r,embeding_model=embeding_model):
-    assert len(r) == 1, r
-    r=r[0]['content']
-    return client.embeddings.create(
-        model=embeding_model,
-        input=r,
-        encoding_format="float"
-    )
-
-
 merged_df['new_embedding'] = make_async_reqs(merged_df, max_workers=10, fn=lambda r: get_embeddings(r['new_sent_convo']).data[0].embedding)
 merged_df['default_embedding'] = make_async_reqs(merged_df, max_workers=10, fn=lambda r: get_embeddings(r['default_sent_convo']).data[0].embedding)
 merged_df2['new_embedding'] = make_async_reqs(merged_df2, max_workers=10, fn=lambda r: get_embeddings(r['new_sent_convo']).data[0].embedding)
 merged_df2['default_embedding'] = make_async_reqs(merged_df2, max_workers=10, fn=lambda r: get_embeddings(r['default_sent_convo']).data[0].embedding)
 
-merged_df['new_default_cos_sim'] = merged_df.apply(lambda r: cosine(r['new_embedding'], r['default_embedding']),axis=1)
-merged_df2['new_default_cos_sim'] = merged_df2.apply(lambda r: cosine(r['new_embedding'], r['default_embedding']),axis=1)
+merged_df['new_default_cos_dist'] = merged_df.apply(lambda r: cosine(r['new_embedding'], r['default_embedding']),axis=1)
+merged_df2['new_default_cos_dist'] = merged_df2.apply(lambda r: cosine(r['new_embedding'], r['default_embedding']),axis=1)
 
+#merged_df = pd.read_pickle("data_dump/oai_mod/merged_df_8b6b0fe.pkl") #1.7GB
+#merged_df2 = pd.read_pickle("data_dump/oai_mod/merged_df_8b6b0fe_lang_checks.pkl") # data_dump/oai_mod/merged_df_8b6b0fe_lang_checks.pkl
+#merged_df = merged_df.rename(columns={"new_default_cos_sim": "new_default_cos_dist"})
+#merged_df2 = merged_df2.rename(columns={"new_default_cos_sim": "new_default_cos_dist"})
 merged_df.to_pickle(f"data_dump/oai_mod/merged_df_{git_hash()}.pkl")
 merged_df2.to_pickle(f"data_dump/oai_mod/merged_df_{git_hash()}_lang_checks.pkl")
 
 # %%
-merged_df =pd.read_pickle("data_dump/oai_mod/merged_df_8b6b0fe.pkl")
-merged_df2 =pd.read_pickle("data_dump/oai_mod/merged_df_8b6b0fe_lang_checks.pkl")
+merged_df =pd.read_pickle("data_dump/oai_mod/merged_df_8a70b20.pkl")
+merged_df2 =pd.read_pickle("data_dump/oai_mod/merged_df_8a70b20_lang_checks.pkl")
 
 def mod_print_summaries(merged_df):
     print(merged_df["new_max_score"].describe(), merged_df["default_max_score"].describe())
@@ -600,7 +608,51 @@ def mod_print_summaries(merged_df):
 mod_print_summaries(merged_df)
 mod_print_summaries(merged_df2)
 
+#%%
+chat_df3 = pd.read_pickle("data_dump/oai_mod/_temp_comparison_base_df8a70b20_base3.pkl")
+check_mod_df3 = pd.concat([
+    make_results_frame(chat_df3, ord_vals=[192, None], model="text-moderation-latest"),
+])
+check_mod_df3 = cut(check_mod_df3)
+# only running for convience, most mod scores will be discarded
+check_mod_df3["new_oai_mod"] = make_async_reqs(check_mod_df3, max_workers=4)
+check_mod_df3.to_pickle(f"data_dump/oai_mod/_tempcomp_results_{git_hash()}_base3.pkl")
+analysis_mod_df3 = check_mod_df3
+merged_df3 = munge_check_mod_df(analysis_mod_df3, chat_df3)
 
+merged_df3['new_embedding'] = make_async_reqs(merged_df3, max_workers=10, fn=lambda r: get_embeddings(r['new_sent_convo']).data[0].embedding)
+merged_df3['default_embedding'] = make_async_reqs(merged_df3, max_workers=10, fn=lambda r: get_embeddings(r['default_sent_convo']).data[0].embedding)
+merged_df3['new_default_cos_dist'] = merged_df3.apply(lambda r: cosine(r['new_embedding'], r['default_embedding']),axis=1)
+
+merged_df3['new_embedding_small'] = make_async_reqs(merged_df3, max_workers=10, fn=lambda r: get_embeddings(r['new_sent_convo'], embeding_model="text-embedding-3-small").data[0].embedding)
+merged_df3['default_embedding_small'] = make_async_reqs(merged_df3, max_workers=10, fn=lambda r: get_embeddings(r['default_sent_convo'], embeding_model="text-embedding-3-small").data[0].embedding)
+merged_df3['new_default_cos_dist_small'] = merged_df3.apply(lambda r: cosine(r['new_embedding_small'], r['default_embedding_small']),axis=1)
+merged_df3.to_pickle(f"data_dump/oai_mod/_temp_merged_df_{git_hash()}_base3.pkl")
+#%%
+n = round(len(merged_df3) * 0.1)
+top_10_percent = merged_df3.nlargest(n, 'new_default_cos_dist')
+print("top 10% of turns most changed by cos dist by text-embedding-3-large")
+mod_print_summaries(top_10_percent)
+top_10_percent.to_pickle(f"data_dump/oai_mod/merged_df_{git_hash()}_base3.pkl")
+
+print("top 10% of turns most changed by cos dist by text-embedding-3-small")
+top_10_percent_small = merged_df3.nlargest(n, 'new_default_cos_dist_small')
+mod_print_summaries(top_10_percent_small)
+top_10_percent_small.to_pickle(f"data_dump/oai_mod/merged_df_{git_hash()}_base3_small.pkl")
+
+#%%
+total_num_tokens = merged_df3['new_sent_convo'].apply(num_tokens_from_messages).sum()
+for per in [0.1, 0.05, 0.01]:
+    df=merged_df3
+    print(per, df['language'].value_counts(normalize=True))
+    # #reduces impact a bit
+    # df = df[df['language'] == 'English']
+    n = round(len(df) * per)
+    df = df.nlargest(n, 'new_default_cos_dist_small')
+    token_frac = df['new_sent_convo'].apply(num_tokens_from_messages).sum() / total_num_tokens
+    print(f"top {int(per*100)}% of turns {token_frac*100:.2f}% of tokens most changed by cos dist measured by text-embedding-3-small")
+    mod_print_summaries(df)
+# 10% was 14% of tokens, 5% was 5.6% of tokens and 1% was 0.2% of tokens for whole df
 # %%
 # Read the strings where adding seperators worked
 def _write_where_missed_flagging(merged_df):
@@ -619,7 +671,7 @@ def _write_where_missed_flagging(merged_df):
 # 133 strs only flagged by 1 sep, then ~30-40 work for 2-7 sep's
 # %%
 # compare the langauge where adding serperators mostly worked
-def print_missed_flag_by_lang_analysis(merged_df, print_only_sig=True):
+def print_missed_flag_by_lang_analysis(merged_df, print_only_sig=True, pval=0.001):
     missed_flag_ix = merged_df["new_any_flagged"] - merged_df["default_any_flagged"] < 0
     lang_default = merged_df["language"].value_counts()
     lang_missed_flag = merged_df["language"][missed_flag_ix].value_counts()
@@ -629,16 +681,20 @@ def print_missed_flag_by_lang_analysis(merged_df, print_only_sig=True):
     p = missed_flag_ix.sum() / len(merged_df)  # Success probability under null hypothesis
     for language in lang_default.index:
         n = lang_default.loc[language]  # Number of trials
-        k = lang_missed_flag.loc[language]  # Number of successes
+        k = lang_missed_flag.get(language, 0)  # Number of successes
         # Binomial test
         p_value = binomtest(k, n, p).pvalue
         results[language] = {"p_value": p_value, "ratio_change": (k / n) / p}
 
     sig_langs = {
-        lan: d for lan, d in results.items() if d["p_value"] < 0.001 / len(lang_default.index)
+        lan: d for lan, d in results.items() if d["p_value"] < pval / len(lang_default)
     }
     # only sig or full
     if print_only_sig:
+        if len(sig_langs) == 0:
+            print(f"No Significant langs at {pval/len(lang_default)}")
+            pprint(results)
+            return
         sig_langs_df = pd.DataFrame(sig_langs.values(), index=sig_langs.keys())
     else:
         sig_langs_df = pd.DataFrame(results.values(), index=results.keys())
@@ -665,6 +721,8 @@ sep_is_192 = merged_df2["manipulation"].apply(lambda d: d["sep"] == chr(192))
 print_missed_flag_by_lang_analysis(merged_df2[~sep_is_192], print_only_sig=False)
 print_missed_flag_by_lang_analysis(merged_df2[sep_is_192], print_only_sig=False)
 print_missed_flag_by_lang_analysis(merged_df2, print_only_sig=False)
+
+print_missed_flag_by_lang_analysis(top_10_percent, print_only_sig=True)
 # %%
 # Make Plots
 from scipy.stats import ks_2samp
@@ -903,10 +961,10 @@ Sent_by_cat_sep_vs_sep(merged_df2, "lang_proc")
 
 #%%
 # see if embeddings different
-def plot_bucket_cosine_sim(merged_df, name, nrows=50):
+def plot_bucket_cosine_dist(merged_df, name, nrows=50):
     sorted_df = merged_df.sort_values(by='new_minus_default_max_score', key=np.abs)
-    big_cos = sorted_df.iloc[-nrows:]['new_default_cos_sim']
-    small_cos = sorted_df.iloc[:nrows]['new_default_cos_sim']
+    big_cos = sorted_df.iloc[-nrows:]['new_default_cos_dist']
+    small_cos = sorted_df.iloc[:nrows]['new_default_cos_dist']
 
     fig, ax = plt.subplots(figsize=(10, 6))
     _ks_hist_plot(small_cos, big_cos,
@@ -921,30 +979,28 @@ def plot_bucket_cosine_sim(merged_df, name, nrows=50):
     fig.show()
     #plt.close(fig)
 
-def reg_cosine_sim(merged_df, name):
+def reg_cosine_dist(merged_df, name, x_name='new_default_cos_dist', y_name='new_minus_default_max_score',embedding_model='text-embedding-3-large'):
     fig, ax = plt.subplots(figsize=(10, 6))
     reg_plot(
-        merged_df['new_default_cos_sim'],
-        merged_df['new_minus_default_max_score'],
-        x_name="Embedding cosine similarity between turn w/ and w/o sep token",
+        merged_df[x_name],
+        merged_df[y_name],
+        x_name="Embedding cosine distance between turn w/ and w/o sep token",
         y_name="Avg Max Mod with seperators - w/o seperators",
-        title=f"Embeding by {embeding_model} vs Max Mod score difference for {name}",
+        title=f"Embeding by {embedding_model} vs Max Mod score difference for {name}",
     )
     fig.tight_layout()
     fig.savefig(f"plots/oai_mod/embedding_cos_dist_reg_{git_hash()}_{name}.png",facecolor="w")
     fig.show()
 
-def show_reg_plot_cos_sim_by_group_avg(merged_df, name):
-    x_name='new_default_cos_sim'
-    y_name='new_minus_default_max_score'
-    df=merged_df.groupby(['language', 'mod_how_str'])[[x_name, y_name]].mean().sort_values('new_default_cos_sim')
+def show_reg_plot_cos_dist_by_group_avg(merged_df, name, x_name='new_default_cos_dist', y_name='new_minus_default_max_score'):
+    df=merged_df.groupby(['language', 'mod_how_str'])[[x_name, y_name]].mean().sort_values('new_default_cos_dist')
     df.reset_index(inplace=True)
     plt.figure(figsize=(10, 8))
     sns.regplot(x=x_name, y=y_name, data=df, fit_reg=True)
 
     # Add labels
     for i in range(df.shape[0]):
-        plt.text(df.loc[i, 'new_default_cos_sim'],
+        plt.text(df.loc[i, 'new_default_cos_dist'],
                  df.loc[i, 'new_minus_default_max_score'],
                  f"{df.loc[i, 'language']}-{df.loc[i, 'mod_how_str']}",
                  horizontalalignment='left',
@@ -959,40 +1015,42 @@ def show_reg_plot_cos_sim_by_group_avg(merged_df, name):
         verticalalignment="top",
         transform=ax.transAxes,
     )
-    plt.xlabel('Mean New Default Cosine Similarity')
+    plt.xlabel('Mean New Default Cosine Distance')
     plt.ylabel('Mean New Minus Default Max Score')
     plt.title(f'Regression Plot with Group Averages for {name}')
     plt.show()
 
 
-
-plot_bucket_cosine_sim(merged_df, "df1", nrows=50)
-reg_cosine_sim(merged_df, "df1")
-show_reg_plot_cos_sim_by_group_avg(merged_df, 'df1')
-
-plot_bucket_cosine_sim(merged_df2, "lang_checks", nrows=50)
-reg_cosine_sim(merged_df2, "lang_checks")
-show_reg_plot_cos_sim_by_group_avg(merged_df2, 'lang_checks')
 #%%
-embedding_sim = pd.concat([df['new_default_cos_sim'] for df in (merged_df, merged_df2) ])
+plot_bucket_cosine_dist(merged_df, "df1", nrows=50)
+reg_cosine_dist(merged_df, "df1")
+show_reg_plot_cos_dist_by_group_avg(merged_df, 'df1')
+
+plot_bucket_cosine_dist(merged_df2, "lang_checks", nrows=50)
+reg_cosine_dist(merged_df2, "lang_checks")
+show_reg_plot_cos_dist_by_group_avg(merged_df2, 'lang_checks')
+
+reg_cosine_dist(merged_df3, "high_cosine_dist", x_name="new_default_cos_dist_small", embedding_model="text-embedding-3-small")
+#%%
+embedding_dist = pd.concat([df['new_default_cos_dist'] for df in (merged_df, merged_df2) ])
 score_diff = pd.concat([df['new_minus_default_max_score'] for df in (merged_df, merged_df2) ])
 
-ax = avg_by_bucket(embedding_sim, score_diff, by_width=True) # xaxis 0 rounded by default
-ax.set_title(f"Total embedding correlation similarity vs score diff by bucket_size")
+ax = avg_by_bucket(embedding_dist, score_diff, by_width=True) # xaxis 0 rounded by default
+ax.set_title(f"Total embedding correlation distance vs score diff by bucket_size")
 plt.show()
 
-ax = avg_by_bucket(embedding_sim, score_diff, by_width=False)
-ax.set_title(f"Total embedding correlation similarity vs score diff by quantile")
+ax = avg_by_bucket(embedding_dist, score_diff, by_width=False)
+ax.set_title(f"Total embedding correlation distance vs score diff by quantile")
 plt.show()
 
-print('Average Cosine Similarity by langauge\n',
-      merged_df.groupby(['language'])[['new_default_cos_sim', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_sim'), #agg(['mean', 'sem']),
-      merged_df2.groupby(['language'])[['new_default_cos_sim', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_sim'), #agg(['mean', 'sem']),
+print('Average Cosine Distance by langauge\n',
+      merged_df.groupby(['language'])[['new_default_cos_dist', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_dist'), #agg(['mean', 'sem']),
+      merged_df2.groupby(['language'])[['new_default_cos_dist', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_dist'), #agg(['mean', 'sem']),
     )
 
-print('Average Cosine Similarity by langauge and mod_how_str',
-      merged_df.groupby(['language', 'mod_how_str'])[['new_default_cos_sim', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_sim'), #agg(['mean', 'sem']),
-      merged_df2.groupby(['language', 'mod_how_str'])[['new_default_cos_sim', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_sim'), #agg(['mean', 'sem']),
+print('Average Cosine Distance by langauge and mod_how_str',
+      merged_df.groupby(['language', 'mod_how_str'])[['new_default_cos_dist', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_dist'), #agg(['mean', 'sem']),
+      merged_df2.groupby(['language', 'mod_how_str'])[['new_default_cos_dist', 'new_minus_default_max_score']].mean().sort_values('new_default_cos_dist'), #agg(['mean', 'sem']),
     )
 
 # %%
