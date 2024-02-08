@@ -90,7 +90,7 @@ all_chat_df = all_chat_df.sort_values(
 ).reset_index(drop=True)
 
 chat_df = all_chat_df.head(1000)
-# chat_df.to_pickle(f"data_dump/oai_mod/comparison_base_df{git_hash()}.pkl")
+chat_df.to_pickle(f"data_dump/oai_mod/comparison_base_df{git_hash()}.pkl")
 
 check_langs = ["Portuguese", "French", "unknown", "Russian"]
 chat_df2 = all_chat_df.iloc[1000:]
@@ -107,6 +107,10 @@ chat_df3.to_pickle(f"data_dump/oai_mod/_temp_comparison_base_df{git_hash()}_base
 
 del all_chat_df
 gc.collect()
+# %%
+chat_df = pd.read_pickle("data_dump/oai_mod/comparison_base_check_mod_df0775b2e.pkl")
+chat_df2 = pd.read_pickle("data_dump/oai_mod/comparison_base_df53ca02c_lang_checks.pkl")
+chat_df3 = pd.read_pickle("data_dump/oai_mod/_temp_comparison_base_df8a70b20_base3.pkl")
 # %% Define functions
 
 
@@ -668,7 +672,6 @@ merged_df3["new_default_cos_dist_small"] = merged_df3.apply(
 )
 merged_df3.to_pickle(f"data_dump/oai_mod/_temp_merged_df_{git_hash()}_base3.pkl")
 
-# merged_df3 = pd.read_pickle("data_dump/oai_mod/_temp_merged_df_8a70b20_base3.pkl")
 merged_df3["new_embedding_ada002"] = make_async_reqs(
     merged_df3,
     max_workers=10,
@@ -688,6 +691,7 @@ merged_df3["new_default_cos_dist_ada002"] = merged_df3.apply(
 )
 
 merged_df3.to_pickle(f"data_dump/oai_mod/_temp_merged_df_{git_hash()}_base3_pt2.pkl")
+# merged_df3 = pd.read_pickle("data_dump/oai_mod/_temp_merged_df_fac53a6_base3_pt2.pkl")
 
 n = round(len(merged_df3) * 0.1)
 top_10_percent = merged_df3.nlargest(n, "new_default_cos_dist")
@@ -718,23 +722,26 @@ def _fn_rate(df, col, per):
     return 100 * np.mean(df["new_any_flagged"] - df["default_any_flagged"] < 0)
 
 
-def print_embedding_fp_fn_net(merged_df3, print_sum=False):
-    cutoffs = [0.25, 0.1, 0.05, 0.01]
+def print_3d_table_by_cols_name_fn(
+    merged_df3,
+    cutoffs=[0.25, 0.1, 0.05, 0.01],
+    model_cols=(
+        ("text-embedding-3-large", "new_default_cos_dist"),
+        ("text-embedding-3-small", "new_default_cos_dist_small"),
+        ("text-embedding-ada-002", "new_default_cos_dist_ada002"),
+    ),
+    name_fn=(
+        ("false negative", _fn_rate),
+        ("false positive", _fp_rate),
+        ("net new unflagged", lambda df, col, per: _fn_rate(df, col, per) - _fp_rate(df, col, per)),
+    ),
+    print_sum=False,
+):
     results = []
-    model2cols = {
-        "text-embedding-3-large": "new_default_cos_dist",
-        "text-embedding-3-small": "new_default_cos_dist_small",
-        "text-embedding-ada-002": "new_default_cos_dist_ada002",
-    }
-    name2fn = {
-        "false negative": _fn_rate,
-        "false positive": _fp_rate,
-        "net new unflagged": lambda df, col, per: _fn_rate(df, col, per) - _fp_rate(df, col, per),
-    }
     for per in cutoffs:
         if print_sum:
             total_num_tokens = merged_df3["new_sent_convo"].apply(num_tokens_from_messages).sum()
-            for model, col in model2cols.items():
+            for model, col in model_cols:
                 df = _get_top(merged_df3, col, per)
                 token_frac = (
                     df["new_sent_convo"].apply(num_tokens_from_messages).sum() / total_num_tokens
@@ -748,8 +755,8 @@ def print_embedding_fp_fn_net(merged_df3, print_sum=False):
         # Compute the false positive and negative rates for each column by cutoff
         data = {
             (model, name): fn(merged_df3, col, per)
-            for model, col in model2cols.items()
-            for name, fn in name2fn.items()
+            for model, col in model_cols
+            for name, fn in name_fn
         }
 
         data["cutoff"] = f"top {int(per*100)}%"
@@ -768,9 +775,9 @@ def print_embedding_fp_fn_net(merged_df3, print_sum=False):
         print(df)
 
 
-print_embedding_fp_fn_net(merged_df3)
+print_3d_table_by_cols_name_fn(merged_df3)
 print("\nEnglish Only\n")
-print_embedding_fp_fn_net(merged_df3.query("language=='English'"))
+print_3d_table_by_cols_name_fn(merged_df3.query("language=='English'"))
 
 
 # print_embedding_fp_fn_net(merged_df3, print_sum=True)
@@ -1221,6 +1228,136 @@ print(
     .mean()
     .sort_values("new_default_cos_dist"),  # agg(['mean', 'sem']),
 )
+# %% Cutoff line for usefulness: code below was run but not used in report
+
+# %%
+# run logistic regression predict if will missidentify flag
+# But basically on predicts 0
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+
+
+def print_log_pred(X, Y, df, random_state=0, cutoffs=[1, 0.5, 0.25, 0.1, 0.05]):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, Y, test_size=0.33, random_state=random_state
+    )
+    # X_train, X_test, y_train, y_test = X, X, Y, Y
+    class_weights = {1: 1, 0: 0.5, -1: 1}
+    if True:
+        clf = LogisticRegression(random_state=random_state, class_weight=class_weights)
+        # clf = LogisticRegression(random_state=random_state)
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        # y_pred = X_test.iloc[:, 1]
+        # print(accuracy_score(y_test, y_pred))
+        print(f"Fraction 0's pred: {(y_pred==0).mean()*100:.1f}%")
+    else:
+        clf = RandomForestClassifier(random_state=random_state, class_weight=class_weights)
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        print(classification_report(y_test, y_pred))
+
+    test_df = df.loc[X_test.index].copy()
+    # not actually sorting on pred_net_unflagged?!?!
+    test_df["pred_net_unflagged"] = y_pred
+    # print(_fn_rate(test_df, "pred_net_unflagged", 0.1))
+
+    for c in cutoffs:
+        top_n_y_test = y_test[_get_top(test_df, "pred_net_unflagged", c).index]
+        assert _fn_rate(test_df, "pred_net_unflagged", c) == np.mean(top_n_y_test > 0) * 100
+
+    print_3d_table_by_cols_name_fn(
+        test_df,
+        print_sum=False,
+        cutoffs=cutoffs,
+        model_cols=(("predicted net unflagged", "pred_net_unflagged"),),
+        name_fn=(
+            ("false negative", _fn_rate),
+            ("false positive", _fp_rate),
+            (
+                "net new unflagged",
+                lambda df, col, per: _fn_rate(df, col, per) - _fp_rate(df, col, per),
+            ),
+        ),
+    )
+
+
+def pre_log_df(df):
+    column_names = [
+        "new_default_cos_dist",
+        "new_default_cos_dist_small",
+        "new_default_cos_dist_ada002",
+    ]
+    cos_dists = df[df.columns.intersection(column_names)]
+    before = cos_dists.copy()
+    before["og_prompt_len"] = df["default_sent_convo"].apply(num_tokens_from_messages)
+    if "og_openai_moderation" in df:
+        og_mod = df["og_openai_moderation"].apply(lambda d: pd.Series(d[0]["category_scores"]))
+        before = pd.concat([before, og_mod], axis=1)
+    # Want avg(Y) as high as possible: used to be now not flagged
+    Y = df["default_any_flagged"] - df["new_any_flagged"]
+    return before, Y
+
+
+def _check_all(df):
+    """
+    Only pred's 0's if have to predict from full dataset.
+    Tons of variance from which subset used
+    """
+    before, Y = pre_log_df(df)
+    print_log_pred(before, Y, df, random_state=0)
+    print_log_pred(before, Y, df, random_state=1)
+    print_log_pred(before, Y, df, random_state=2)
+    # WARN: There's a huge variance in how predictive the column is based on the subset used
+
+    # These still don't help
+    # print("INFO: With moderation scores that won't have in prod")
+    # cat_max_score_diffs = df["new_oai_mod"].apply(
+    #    lambda d: pd.Series(d["results"][0]["category_scores"])
+    # ) - df["default_oai_mod"].apply(lambda d: pd.Series(d["results"][0]["category_scores"]))
+    # X = pd.concat([cos_dists, cat_max_score_diffs], axis=1)
+    # print_log_pred(X, Y, df)
+
+
+def _check_part(in_df, cutoffs=[1, 0.5, 0.25, 0.1]):
+    """
+    pre-filter on old og_max_mod before sending to log reg
+    Since all merge_df's have already been filtered once on og_openai_moderation
+        this doesn't have an effect?
+    With high cutoffs only things that are flagged by both,
+        so total result is 1/0 fp and 0 fn.
+    Only "things in the middle" that escape mod?
+    """
+    in_df = in_df.copy()
+    in_df["og_max_mod"] = in_df["og_openai_moderation"].apply(chat_max_scores)
+    for c in cutoffs:
+        df = _get_top(in_df, "og_max_mod", c)
+        before, Y = pre_log_df(df.drop("og_openai_moderation", axis=1))
+        print(f"Prefiltered Cutoff at: {c}")
+        print_log_pred(before, Y, df, random_state=2, cutoffs=[1, 0.5, 0.25, 0.1])
+
+
+df3_wold = merged_df3.copy()
+cid2oai = chat_df3[["conversation_id", "openai_moderation"]].set_index("conversation_id")
+df3_wold["og_openai_moderation"] = df3_wold.apply(
+    lambda r: [cid2oai.loc[r["conversation_id"]][0][r["convo_ix"]]], axis=1
+)
+# _check_all(df3_wold.query('language=="English"'))
+# _check_part(df3_wold)  # .query('language=="English"'))
+_check_all(merged_df2.query('language=="Russian"'))
+_check_all(merged_df2)
+# Russian does way better than everything combined
+# %%
+# Big variance by chunks of 100 rows
+df = merged_df3.query("language=='English'")
+chunk_size = int(len(df) * 0.1)  # 10% of the DataFrame's length
+for i in range(0, len(df), chunk_size):
+    chunk = df.iloc[i : i + chunk_size]
+    print_3d_table_by_cols_name_fn(chunk, cutoffs=[0.1, 0.05])
+
 
 # %%
 # Check if it matters to send the whole conversation in at once or in pieces
