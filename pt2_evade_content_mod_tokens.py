@@ -209,10 +209,12 @@ def make_results_frame(
     return pd.concat(new_dfs)
 
 
-def cut(check_mod_df):
-    MAX_MOD_ITEMS = 32
-    MAX_TURN_TOKENS = 4096  # not sure if real limitation
-    MAX_MOD_TOKENS = 32768 - 5
+def cut(
+    check_mod_df,
+    MAX_MOD_ITEMS=32,
+    MAX_TURN_TOKENS=4096,  # not sure if real limitation on moderation
+    MAX_MOD_TOKENS=32768 - 5,  # model w shortest context window
+):
     check_mod_df["sent_convo"] = check_mod_df["sent_convo"].apply(
         lambda l: end_of_convo(
             [
@@ -339,7 +341,7 @@ check_mod_df2.to_pickle(f"data_dump/oai_mod/comp_results_{git_hash()}_lang_check
 
 
 # %%
-# Start of Analysis
+# Analysis munging functions
 def _split_convo_into_sep_turn_rows(
     analysis_mod_df,
     cols2split=["sent_convo", "new_oai_mod"],
@@ -597,13 +599,13 @@ def munge_check_mod_df(result_df, chat_df):
     return merged_df
 
 
-# chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
-# analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_ba0cefe.pkl")
+# %%
+chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
+analysis_mod_df = pd.read_pickle("data_dump/oai_mod/comp_results_ba0cefe.pkl")
 merged_df = munge_check_mod_df(analysis_mod_df, chat_df)
 # old_merged_df = pd.read_pickle("data_dump/oai_mod/merged_df_8b6b0fe.pkl") #1.7GB since of cosine sim
-assert old_merged_df[merged_df.columns].equals(merged_df)
+# assert old_merged_df[merged_df.columns].equals(merged_df)
 
-# %%
 chat_df2 = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df53ca02c_lang_checks.pkl")
 analysis_mod_df2 = pd.read_pickle("data_dump/oai_mod/comp_results_d7a8db3_lang_check.pkl")
 merged_df2 = munge_check_mod_df(analysis_mod_df2, chat_df2)
@@ -784,12 +786,12 @@ def _get_top(df, col, per):
 
 def _fp_rate(df, col, per):
     df = _get_top(df, col, per)
-    return 100 * np.mean(df["new_any_flagged"] - df["default_any_flagged"] > 0)
+    return 100 * np.mean(df["new_any_flagged"] & ~df["default_any_flagged"])
 
 
 def _fn_rate(df, col, per):
     df = _get_top(df, col, per)
-    return 100 * np.mean(df["new_any_flagged"] - df["default_any_flagged"] < 0)
+    return 100 * np.mean(~df["new_any_flagged"] & df["default_any_flagged"])
 
 
 def print_3d_table_by_cols_name_fn(
@@ -856,18 +858,18 @@ def print_3d_table_by_cols_name_fn(
 import random
 
 
-def chunk_dataframe(df, mx_token_blocks, len_limit, chunk_row="new_sent_convo"):
-    # Initialize variables for chunking
-    # chunks_of_ixs = []
+def chunk_dataframe(df, mx_token_blocks, len_limit=1e100, chunk_row="new_sent_convo"):
     current_chunk = []
     current_token_count = 0
 
     # always in sorted order by iloc
     for ix, row in enumerate(df.itertuples()):
         row_token_count = num_tokens_from_messages(getattr(row, chunk_row))
-        if (
+        if row_token_count > mx_token_blocks:
+            print(f"WARN: line too long {ix} {row_token_count}")
+        elif (
             current_token_count + row_token_count > mx_token_blocks
-            or len(current_chunk) > len_limit
+            or len(current_chunk) + 1 > len_limit
         ):
             yield current_chunk
             current_chunk = [ix]
@@ -875,17 +877,6 @@ def chunk_dataframe(df, mx_token_blocks, len_limit, chunk_row="new_sent_convo"):
         else:
             current_chunk.append(ix)
             current_token_count += row_token_count
-    # for row in df.iterrows():
-    #    row_token_count = num_tokens_from_messages(row[chunk_row])
-    #    if current_token_count + row_token_count > mx_token_blocks:
-    #        chunks_of_ixs.append(current_chunk)
-    #        current_chunk = [ix]
-    #        current_token_count = row_token_count
-    #    else:
-    #        current_chunk.append(ix)
-    #        current_token_count += row_token_count
-
-    # Add last chunk if not empty
     if current_chunk:
         yield current_chunk
 
@@ -900,21 +891,44 @@ def get_endpoint(model):
     return endpoint
 
 
-@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=2)
+@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=10)
+def get_mod2(series, model="text-moderation-latest"):
+    mod_in = series.apply(lambda l: l[0]["content"]).tolist()
+    mod_in = [i if len(i) > 0 else " " for i in mod_in]
+    o = client.moderations.create(input=mod_in, model=model).model_dump()
+    return [{**o, "results": [m]} for m in o["results"]]
+    # return client.moderations.create(input=series, model=model).model_dump()
+
+
+@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=6)
 def send_request(series, model):
-    # Placeholder for sending chunk to the specific endpoint and handling the response
-    # This function will differ based on whether it's the embedding or moderation endpoint
+    """Assumes Series contains enough data for ~1m of requests"""
     assert series.apply(len).unique() == 1
     endpoint = get_endpoint(model)
     if endpoint == "moderation":
-        assert False
-        mod_in = series.apply(lambda l: l[0]["content"]).tolist()
-        print(mod_in[:1])
-        print(num_tokens_from_string("".join(mod_in)))
-        return [m.model_dump() for m in client.moderations.create(input=mod_in, model=model)]
+        # need to do a set of 2nd chunking since limited to batches of 32
+        # len_limit = 32
+        # but there's some bug when sending big batches so I'm being even more cautious
+        len_limit = 4
+        df = series.to_frame()
+        smaller_chunks = list(  # limited by len anyway, just being careful
+            chunk_dataframe(df, 100000, len_limit=len_limit, chunk_row=df.columns[0])
+        )
+        try:
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                out = [
+                    d
+                    for chunk in executor.map(get_mod2, [series.iloc[ix] for ix in smaller_chunks])
+                    for d in chunk
+                ]
+        except:
+            print(f"{datetime.now()} Errored and Sleeping")
+        return out
+
     elif endpoint == "embedding":
+        # can be sync since sending as 1 request
         mod_in = series.apply(lambda l: l[0]["content"]).tolist()
-        # print(num_tokens_from_string("".join(mod_in)))
+        mod_in = [i if len(i) > 0 else " " for i in mod_in]
         res = client.embeddings.create(model=model, input=mod_in, encoding_format="float")
         # For embeddings people asserted the order is never muddled, but not true of completions
         out = [np.array(m.embedding) for m in sorted(res.data, key=lambda o: o.index)]
@@ -924,20 +938,37 @@ def send_request(series, model):
         assert False
 
 
-def batch_apply(df, col_on, model, tpm_limit={"embedding": 10000000}, validate=True):
-    """Sending sync since uses full token batche of each minute"""
+def batch_apply(
+    df,
+    col_on,
+    model,
+    tpm_limit={"embedding": 10000000, "moderation": 150000},
+    len_limit={"embedding": 1e6, "moderation": 32 * 1e4},
+    validate=True,
+):
+    """Sending batches that max tokens per minute"""
     endpoint = get_endpoint(model)
-    assert (
-        endpoint != "moderation"
-    ), "Batchings not faster for moderation, since can only send 32 at once"
-    len_limit = 32 if endpoint == "moderation" else 99**99
-
     print(f"Starting {datetime.now()} {model} {col_on}")
     results = []
-    for ixs in chunk_dataframe(df, tpm_limit[endpoint], len_limit, col_on):
+    gen_ix_chunks = chunk_dataframe(
+        df, tpm_limit[endpoint], len_limit=len_limit[endpoint], chunk_row=col_on
+    )
+    for ixs in gen_ix_chunks:
         chunk_df = df.iloc[ixs]
-        result = send_request(chunk_df[col_on], model)
-        results += result
+        try:
+            result = send_request(chunk_df[col_on], model)
+            results += result
+        except:
+            print(f"{datetime.now()} ignoring error", ixs)
+            # time.sleep(60)
+            for small_ixs in chunk_dataframe(
+                df.iloc[ixs],
+                max(1, tpm_limit[endpoint] // 20),
+                len_limit=max(1, len_limit[endpoint] // 20),
+                chunk_row=col_on,
+            ):
+                chunk_df = df.iloc[ixs].iloc[small_ixs]
+                results += send_request(chunk_df[col_on], model)
         print(f"Finished Chunk {datetime.now()} {model} {col_on}")
 
     if validate:
@@ -946,76 +977,90 @@ def batch_apply(df, col_on, model, tpm_limit={"embedding": 10000000}, validate=T
         last_rest = results[ri : ri + 1]
         run_again = send_request(last_in, model)
         assert len(last_rest) == len(run_again), f"voodoo: {ri} {last_rest} {run_again}"
-        last_rest, run_again = last_rest[0], run_again[0]
-        assert np.allclose(last_rest, run_again, atol=1e-03), f"{last_rest} vs. {run_again} "
+        if endpoint == "embedding":
+            last_rest, run_again = last_rest[0], run_again[0]
+            assert np.allclose(last_rest, run_again, atol=1e-03), f"{last_rest} vs. {run_again} "
+        else:
+            last_rest = np.array(list(last_rest[0]["results"][0]["category_scores"].values()))
+            run_again = np.array(list(run_again[0]["results"][0]["category_scores"].values()))
+            # mod scores from sending together vs individualy so are slightly different?
+            assert np.allclose(last_rest, run_again, atol=3e-02), f"{last_rest} vs. {run_again} "
+
     return results
 
 
-@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=4)
-def get_mod2(mod_in, model="text-moderation-latest"):
-    # assert isinstance(mod_in, str) or isinstance(mod_in[0], str):
-    return client.moderations.create(input=mod_in, model=model).model_dump()
-
-
-check_mod_df4 = make_results_frame(
-    chat_df4.head(5),
-    ord_vals=[192, None],
-    model="text-moderation-latest",
-    keep_old_oai_mod=True,
-)
-check_mod_df4 = cut(check_mod_df4)
-# check_mod_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_check_mod_df4_{git_hash()}.pkl")
-
-is_mod = check_mod_df4["manipulation"].apply(lambda d: d["sep"] is not None)
-preembed_df4 = check_mod_df4[is_mod].copy().rename(columns={"sent_convo": "new_sent_convo"})
-preembed_df4 = preembed_df4.join(
-    check_mod_df4.loc[~is_mod, "sent_convo"].rename("default_sent_convo")
-)
-
-preembed_df4 = _split_convo_into_sep_turn_rows(
-    preembed_df4,
-    cols2split=["new_sent_convo", "default_sent_convo", "og_openai_moderation"],
-    cols_as_list=["new_sent_convo", "default_sent_convo", "og_openai_moderation"],
-    run_asserts=False,
-)
-# Don't make dup free, since want these to send as part of whole convos
-
-# preembed_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_preembed_df4_{git_hash()}.pkl")
-
-# preembed_df4["new_embedding_small"] = batch_apply(preembed_df4, "new_sent_convo", "text-embedding-3-small")
-
-mo = make_async_reqs(
-    preembed_df4.head(),
-    max_workers=5,
-    fn=lambda r: get_mod2(r["new_sent_convo"], model="text-moderation-latest").data[0].embedding,
-)
-
-# preembed_df4["new_oai_mod"] = mo
-mo
 # %%
 
-check_mod_df4["new_embedding_small"] = batch_apply(check_mod_df4["new_sent_convo"], "embedding")
-check_mod_df4["default_embedding_small"] = batch_apply(
-    check_mod_df4["default_sent_convo"], "embedding"
+if True:
+    check_mod_df4 = pd.read_pickle("data_dump/oai_mod/big_bad_finetune_check_mod_df4_fa6dc40.pkl")
+else:
+    check_mod_df4 = make_results_frame(
+        chat_df4,
+        ord_vals=[192, None],
+        model="text-moderation-latest",
+        keep_old_oai_mod=True,
+    )
+    check_mod_df4 = cut(check_mod_df4)
+    check_mod_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_check_mod_df4_{git_hash()}.pkl")
+
+if True:
+    preembed_df4 = pd.read_pickle("data_dump/oai_mod/big_bad_finetune_preembed_df4_fa6dc40.pkl")
+else:
+    is_mod = check_mod_df4["manipulation"].apply(lambda d: d["sep"] is not None)
+    preembed_df4 = check_mod_df4[is_mod].copy().rename(columns={"sent_convo": "new_sent_convo"})
+    preembed_df4 = preembed_df4.join(
+        check_mod_df4.loc[~is_mod, "sent_convo"].rename("default_sent_convo")
+    )
+    cid2lang = chat_df4[["conversation_id", "language"]].set_index("conversation_id")["language"]
+    preembed_df4["language"] = preembed_df4["conversation_id"].apply(lambda c: cid2lang[c])
+    print(preembed_df4["new_sent_convo"].apply(num_tokens_from_messages).describe())
+
+    preembed_df4 = _split_convo_into_sep_turn_rows(
+        preembed_df4,
+        cols2split=["new_sent_convo", "default_sent_convo", "og_openai_moderation"],
+        cols_as_list=["new_sent_convo", "default_sent_convo", "og_openai_moderation"],
+        run_asserts=False,
+    )
+    # Don't make dup free, since want these to send as part of whole convos
+    preembed_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_preembed_df4_{git_hash()}.pkl")
+# %%
+preembed_df4["new_embedding_small"] = batch_apply(
+    preembed_df4, "new_sent_convo", "text-embedding-3-small", validate=False
 )
-check_mod_df4["new_default_cos_dist_small"] = check_mod_df4.apply(
+preembed_df4["default_embedding_small"] = batch_apply(
+    preembed_df4, "default_sent_convo", "text-embedding-3-small", validate=False
+)
+preembed_df4["new_default_cos_dist_small"] = preembed_df4.apply(
     lambda r: cosine(r["new_embedding_small"], r["default_embedding_small"]), axis=1
 )
-check_mod_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_added_embeddings_df4_{git_hash()}.pkl")
+preembed_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_added_embeddings_df4_{git_hash()}.pkl")
 
 PER_KEEP = 0.05
-n = round(len(check_mod_df4) * PER_KEEP)
-big_dist_df4 = check_mod_df4.nlargest(n, "new_default_cos_dist_small")
+n = round(len(preembed_df4) * PER_KEEP)
+big_dist_df4 = preembed_df4.nlargest(n, "new_default_cos_dist_small")
 big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_pre_mod_filter_{git_hash()}.pkl")
 
-big_dist_df4["new_oai_mod"] = batch_apply(big_dist_df4["new_sent_convo"], "moderation")
+big_dist_df4["new_oai_mod"] = batch_apply(
+    big_dist_df4, "new_sent_convo", "text-moderation-latest", validate=False
+)
+# big_dist_df4["new_oai_mod"] = big_dist_df4["new_oai_mod"].apply(lambda d: d if isinstance(d, list) else [d])
 
 big_dist_df4["new_max_score"] = big_dist_df4["new_oai_mod"].apply(chat_max_scores)
 big_dist_df4["new_any_flagged"] = big_dist_df4["new_oai_mod"].apply(chat_is_flagged)
 big_dist_df4["og_max_score"] = big_dist_df4["og_openai_moderation"].apply(chat_max_scores)
 big_dist_df4["og_any_flagged"] = big_dist_df4["og_openai_moderation"].apply(chat_is_flagged)
 big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_w_mod_{git_hash()}.pkl")
-# %%
+
+df4 = big_dist_df4.rename(
+    columns={"og_any_flagged": "default_any_flagged", "og_max_score": "default_max_score"}
+)
+
+print_3d_table_by_cols_name_fn(
+    df4,
+    cutoffs=[1, 0.5, 0.25, 0.1, 0.05, 0.01],
+    model_cols=(("text-embedding-3-small", "new_default_cos_dist_small"),),
+)
+
 # # format: {"messages": [{"role": "system", "content": "Marv is a factual chatbot that is also sarcastic."}, {"role": "user", "content": "What's the capital of France?"}, {"role": "assistant", "content": "Paris, as if everyone doesn't know that already."}]}
 # each turn has 4k, limit should already be short enough
 from src.make_prompts import make_prompt13
@@ -1052,11 +1097,12 @@ def filter_and_join(group):
         only_one = filtered_group["new_sent_convo"]
         return single_turn(only_one, lang, system)
 
-    roles = filtered_group["new_sent_convo"].apply(lambda l: l[0]["role"])
-    # Ensure that the 'role' alternates between users and assistant
-    filtered_group = filtered_group[roles != roles.shift()]
-    if len(filtered_group) <= 1:
-        return single_turn(filtered_group["new_sent_convo"], lang, system)
+    # not needed?
+    # # Ensure that the 'role' alternates between users and assistant
+    # roles = filtered_group["new_sent_convo"].apply(lambda l: l[0]["role"])
+    # filtered_group = filtered_group[roles != roles.shift()]
+    # if len(filtered_group) <= 1:
+    #     return single_turn(filtered_group["new_sent_convo"], lang, system)
 
     # Join the messages into a single string
     convo_joined = sum(filtered_group["new_sent_convo"].tolist(), [])
@@ -1064,7 +1110,7 @@ def filter_and_join(group):
 
 
 # Apply the function to each group
-def make_finetune_convos(df, convo_ids=None):
+def make_finetune_convos1(df, convo_ids=None):
     if convo_ids is None:
         convo_ids = df.query("default_any_flagged ==True and new_any_flagged ==False")[
             "conversation_id"
@@ -1081,9 +1127,8 @@ def make_finetune_convos(df, convo_ids=None):
     return df_grouped
 
 
-def start_finetune(df, fname, convo_ids=None):
+def start_finetune(send_df, fname):
     """Convert a df into a json file and start a finetune training"""
-    send_df = make_finetune_convos(df, convo_ids=convo_ids)
     assert len(send_df) > 10, "min finetune len is 10 convos"
 
     dir = "data_dump/oai_mod/finetune"
@@ -1113,17 +1158,24 @@ def start_finetune(df, fname, convo_ids=None):
 # # First Proof you can finetune where was flagged but now isn't
 
 
-# %% data all made
+# data all made
 # use original old oai endpoint for filtering
-df4 = big_dist_df4.rename(columns={"og_any_flagged": "default_any_flagged"})
-print_3d_table_by_cols_name_fn(
-    df4,
-    cutoffs=[1, 0.5, 0.25, 0.1, 0.05, 0.01],
-    model_cols=(("text-embedding-3-small", "new_default_cos_dist_small"),),
+print(
+    "Total bad Token through 2 steps: ",
+    df4["default_sent_convo"].apply(num_tokens_from_messages).describe(),
 )
-sending_df4 = df4.query("new_any_flagged is False and new_max_score < 0.55")
-print(sending_df4["default_sent_convo"].apply(num_tokens_from_messages).describ())
-make_finetune_convos(df4, convo_ids=sending_df4.conversation_id.unique())
+sending_df4 = df4.query("new_any_flagged==False and new_max_score < 0.55")
+print(
+    "Total bad Token through filtering: ",
+    sending_df4["default_sent_convo"].apply(num_tokens_from_messages).describe(),
+)
+
+made_convo = make_finetune_convos1(df4, convo_ids=sending_df4.conversation_id.unique())
+print(
+    "Tokenings sending to finetune: ",
+    made_convo["finetune_convo"].apply(num_tokens_from_messages).describe(),
+)
+start_finetune(made_convo, "chat_df4_ft1.json")
 
 
 # %%
@@ -1850,3 +1902,39 @@ new = (
     + 3
     * merged_df2[merged_df2["conversation_id"].isin(long_convos)].groupby("conversation_id").size()
 )
+
+# %%
+# preembed_df4["new_embedding_small"] = batch_apply(
+#    preembed_df4, "new_sent_convo", "text-embedding-3-small"
+# )
+
+bad_df = preembed_df4.iloc[bad_emd_ixs].copy()
+print(bad_df.shape)
+bad_df["new_embedding_small"] = batch_apply(
+    bad_df,
+    "new_sent_convo",
+    "text-embedding-3-small",
+)
+bad_df2 = bad_df.head(2000)
+print(bad_df2.shape)
+bad_df2["new_oai_mod"] = batch_apply(
+    bad_df2, "new_sent_convo", "text-moderation-latest", validate=True
+)
+print(
+    "Total bad Token through 2 steps: ",
+    bad_df2["default_sent_convo"].apply(num_tokens_from_messages).describe(),
+)
+sending_bad_df2 = bad_df2.query("new_any_flagged==False and new_max_score < 0.55")
+print(
+    "Total bad Token through filtering: ",
+    sending_bad_df2["default_sent_convo"].apply(num_tokens_from_messages).describe(),
+)
+
+made_convo = make_finetune_convos1(bad_df2, convo_ids=sending_bad_df2.conversation_id.unique())
+print(
+    "Tokenings sending to finetune: ",
+    made_convo["finetune_convo"]
+    .apply(lambda d: num_tokens_from_messages(d["messages"]))
+    .describe(),
+)
+# start_finetune(made_convo, "chat_bad_df2_ft1.json")
