@@ -154,10 +154,18 @@ def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding):
 
 def take_last_tokens(c, max_tokens=MX_TOKENS, enc=encoding):
     """
-    converts a string to only having at most max_tokens
+    converts a string to only having at most max_tokens, taken from end of c
     useful when insert non-single token characters and need to have long completions
     """
     return enc.decode(enc.encode(c)[-max_tokens:])
+
+
+def take_first_tokens(c, max_tokens=MX_TOKENS, enc=encoding):
+    """
+    converts a string to only having at most max_tokens, taken from start of c
+    useful when insert non-single token characters and need to have long completions
+    """
+    return enc.decode(enc.encode(c)[:max_tokens])
 
 
 def get_completion(model, s, sep=SEP, client=client):
