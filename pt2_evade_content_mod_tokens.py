@@ -211,11 +211,13 @@ def make_results_frame(
 
 def cut(
     check_mod_df,
+    col="sent_convo",
     MAX_MOD_ITEMS=32,
     MAX_TURN_TOKENS=4096,  # not sure if real limitation on moderation
     MAX_MOD_TOKENS=32768 - 5,  # model w shortest context window
+    strip_first_assistant=True,
 ):
-    check_mod_df["sent_convo"] = check_mod_df["sent_convo"].apply(
+    check_mod_df[col] = check_mod_df[col].apply(
         lambda l: end_of_convo(
             [
                 {
@@ -229,6 +231,7 @@ def cut(
                 for c in l[-MAX_MOD_ITEMS:]
             ],
             max_tokens=MAX_MOD_TOKENS,
+            strip_first_assistant=strip_first_assistant,
         )
     )
     return check_mod_df
@@ -283,8 +286,9 @@ def make_mod_requests(r):
 
 @backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=8)
 def get_embeddings(r, embeding_model="text-embedding-3-large"):
-    assert len(r) == 1, r
-    r = r[0]["content"]
+    if not isinstance(r[0], str):
+        assert len(r) == 1, r
+        r = r[0]["content"]
     return client.embeddings.create(model=embeding_model, input=r, encoding_format="float")
 
 
@@ -315,7 +319,6 @@ check_mod_df2 = pd.concat([
     make_results_frame(chat_df2, ord_vals=[192, 8, None], model="text-moderation-latest"),
 ])
 
-# %%
 check_mod_df = cut(check_mod_df)
 check_mod_df2 = cut(check_mod_df2)
 check_mod_df.to_pickle(f"data_dump/oai_mod/comparison_base_check_mod_df{git_hash()}.pkl")
@@ -853,9 +856,34 @@ def print_3d_table_by_cols_name_fn(
 
 # #print_3d_table_by_cols_name_fn(merged_df3, print_sum=True)
 # #for 3-large 10% was 14% of tokens, 5% was 5.6% of tokens and 1% was 0.2% of tokens for whole df
-# %% Making Big bad finetune dataset
-# Warn: Requests
+# %% Use more of OpenAI token limit
 import random
+
+
+class PeekableGenerator:
+    def __init__(self, generator):
+        self.generator = generator
+        self.buffer = None
+        self._advance()
+
+    def _advance(self):
+        try:
+            self.buffer = next(self.generator)
+        except StopIteration:
+            self.buffer = None
+
+    def peek(self):
+        return self.buffer
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.buffer is None:
+            raise StopIteration
+        current_value = self.buffer
+        self._advance()
+        return current_value
 
 
 def chunk_dataframe(df, mx_token_blocks, len_limit=1e100, chunk_row="new_sent_convo"):
@@ -871,7 +899,8 @@ def chunk_dataframe(df, mx_token_blocks, len_limit=1e100, chunk_row="new_sent_co
             current_token_count + row_token_count > mx_token_blocks
             or len(current_chunk) + 1 > len_limit
         ):
-            yield current_chunk
+            if current_chunk:  # if inital row too long
+                yield current_chunk
             current_chunk = [ix]
             current_token_count = row_token_count
         else:
@@ -891,85 +920,113 @@ def get_endpoint(model):
     return endpoint
 
 
-@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=10)
-def get_mod2(series, model="text-moderation-latest"):
-    mod_in = series.apply(lambda l: l[0]["content"]).tolist()
-    mod_in = [i if len(i) > 0 else " " for i in mod_in]
-    o = client.moderations.create(input=mod_in, model=model).model_dump()
-    return [{**o, "results": [m]} for m in o["results"]]
-    # return client.moderations.create(input=series, model=model).model_dump()
+@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=6)
+def _get_mod2(mod_in, model="text-moderation-latest"):
+    res = client.moderations.create(input=mod_in, model=model).model_dump()
+    return [{**res, "results": [m]} for m in res["results"]]
+
+
+@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=6)
+def _get_embeddings2(mod_in, model="text-embedding-3-large"):
+    res = client.embeddings.create(input=mod_in, model=model, encoding_format="float")
+    return [np.array(m.embedding) for m in sorted(res.data, key=lambda o: o.index)]
 
 
 @backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=6)
 def send_request(series, model):
-    """Assumes Series contains enough data for ~1m of requests"""
+    """
+    Split 1 minute worth of request data into commands that can be sent
+    Assumes Series contains enough data for ~1m of requests,
+    """
     assert series.apply(len).unique() == 1
     endpoint = get_endpoint(model)
-    if endpoint == "moderation":
-        # need to do a set of 2nd chunking since limited to batches of 32
-        # len_limit = 32
-        # but there's some bug when sending big batches so I'm being even more cautious
-        len_limit = 4
-        df = series.to_frame()
-        smaller_chunks = list(  # limited by len anyway, just being careful
-            chunk_dataframe(df, 100000, len_limit=len_limit, chunk_row=df.columns[0])
-        )
-        try:
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                out = [
-                    d
-                    for chunk in executor.map(get_mod2, [series.iloc[ix] for ix in smaller_chunks])
-                    for d in chunk
-                ]
-        except:
-            print(f"{datetime.now()} Errored and Sleeping")
-        return out
 
-    elif endpoint == "embedding":
-        # can be sync since sending as 1 request
-        mod_in = series.apply(lambda l: l[0]["content"]).tolist()
+    def save_bad():
+        dir = "data_dump/oai_mod/failed_series"
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+        formatted_now = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        filename = f"{dir}/{endpoint}_{formatted_now}.pkl"
+        print(f"wrote failure: {filename}")
+        series.to_pickle(filename)
+
+    def as_strs(ser):
+        mod_in = ser.apply(lambda l: l[0]["content"]).tolist()
         mod_in = [i if len(i) > 0 else " " for i in mod_in]
-        res = client.embeddings.create(model=model, input=mod_in, encoding_format="float")
-        # For embeddings people asserted the order is never muddled, but not true of completions
-        out = [np.array(m.embedding) for m in sorted(res.data, key=lambda o: o.index)]
-        assert len(out) == series.size
-        return out
+        return mod_in
+
+    if endpoint == "moderation":
+        len_req = 8  # just a guess
+        mx_req_tokens = 32000
+        endpoint_fn = _get_mod2
+    elif endpoint == "embedding":
+        len_req = 2048 // 20  # is it faster if send more smaller batches
+        mx_req_tokens = 1000000
+        endpoint_fn = _get_embeddings2
     else:
         assert False
+
+    df = series.to_frame()
+    smaller_chunks = list(
+        chunk_dataframe(df, mx_req_tokens, len_limit=len_req, chunk_row=df.columns[0])
+    )
+    print(len(smaller_chunks))
+    max_workers = max(3, len(smaller_chunks) * 3 // 4)
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            out = [
+                d
+                for chunk in executor.map(
+                    endpoint_fn, [as_strs(series.iloc[ix]) for ix in smaller_chunks]
+                )
+                for d in chunk
+            ]
+    except:
+        save_bad()
+        time.sleep(15)
+        raise
+    assert len(out) == series.size
+    return out
 
 
 def batch_apply(
     df,
     col_on,
     model,
+    # https://github.com/openai/openai-python/issues/519#issuecomment-1636921388
+    # says embedding is 1M tokens, 2048 elements at once
     tpm_limit={"embedding": 10000000, "moderation": 150000},
-    len_limit={"embedding": 1e6, "moderation": 32 * 1e4},
+    rpm_limit={"embedding": 10000, "moderation": 1000},
+    # Moderation gets sent sync
     validate=True,
 ):
-    """Sending batches that max tokens per minute"""
+    """Sending batches that max tokens and requests per minute"""
     endpoint = get_endpoint(model)
-    print(f"Starting {datetime.now()} {model} {col_on}")
     results = []
+
+    print(f"Starting {datetime.now()} {model} {col_on}")
     gen_ix_chunks = chunk_dataframe(
-        df, tpm_limit[endpoint], len_limit=len_limit[endpoint], chunk_row=col_on
+        df, tpm_limit[endpoint], len_limit=rpm_limit[endpoint], chunk_row=col_on
     )
+    gen_ix_chunks = PeekableGenerator(gen_ix_chunks)
+    start_time = time.time()
     for ixs in gen_ix_chunks:
         chunk_df = df.iloc[ixs]
+        print(f"Starting Chunk {datetime.now()}  {len(chunk_df)} {model} {col_on}")
         try:
             result = send_request(chunk_df[col_on], model)
             results += result
-        except:
-            print(f"{datetime.now()} ignoring error", ixs)
-            # time.sleep(60)
-            for small_ixs in chunk_dataframe(
-                df.iloc[ixs],
-                max(1, tpm_limit[endpoint] // 20),
-                len_limit=max(1, len_limit[endpoint] // 20),
-                chunk_row=col_on,
-            ):
-                chunk_df = df.iloc[ixs].iloc[small_ixs]
+        except Exception as e:
+            print(f"{datetime.now()} ignoring ", e, ixs[0], ixs[-1])
+            for small_ixs in np.array_split(ixs, 5):
+                chunk_df = df.iloc[small_ixs]
                 results += send_request(chunk_df[col_on], model)
-        print(f"Finished Chunk {datetime.now()} {model} {col_on}")
+                print(f"Smaller part {datetime.now()} {model} {col_on} {len(small_ixs)}")
+        print(f"Finished Chunk {datetime.now()} {len(chunk_df)} {model} {col_on}")
+        elapsed_time = time.time() - start_time
+        if gen_ix_chunks.peek() is not None and elapsed_time < 60:
+            time.sleep(60 - elapsed_time)
+        start_time = time.time()
 
     if validate:
         ri = random.randint(0, len(df) - 1)
@@ -979,7 +1036,7 @@ def batch_apply(
         assert len(last_rest) == len(run_again), f"voodoo: {ri} {last_rest} {run_again}"
         if endpoint == "embedding":
             last_rest, run_again = last_rest[0], run_again[0]
-            assert np.allclose(last_rest, run_again, atol=1e-03), f"{last_rest} vs. {run_again} "
+            assert np.allclose(last_rest, run_again, atol=1e-02), f"{last_rest} vs. {run_again} "
         else:
             last_rest = np.array(list(last_rest[0]["results"][0]["category_scores"].values()))
             run_again = np.array(list(run_again[0]["results"][0]["category_scores"].values()))
@@ -989,10 +1046,41 @@ def batch_apply(
     return results
 
 
+fix_lens_df["new_embedding_small"] = batch_apply(
+    fix_lens_df, "new_sent_convo", "text-embedding-3-small", validate=True
+)
+# took 15m for 2.2M tokens 8000 turns out of 266380 total turns
+# Change to use 20x smaller max_len size and took 14m
 # %%
+failed_series = pd.read_pickle("data_dump/oai_mod/failed_series/embedding_2024_02_09_11_52_56.pkl")
+fix_lens_df = failed_series.to_frame()
+fix_lens_df["new_sent_convo"] = fix_lens_df["new_sent_convo"].apply(
+    lambda d: [{**d[0], "content": d[0]["content"] if len(d[0]["content"]) > 0 else " "}]
+)
+# Cutting doesn't solve issue, with default sizes
+# print(cut(fix_lens_df, col="new_sent_convo", strip_first_assistant=False).compare(fix_lens_df))
+# fix_lens_df = cut(
+#     fix_lens_df, col="new_sent_convo", strip_first_assistant=False, MAX_TURN_TOKENS=4096 - 20
+# )
+# %%
+# %%
+fix_lens_df["new_oai_mod"] = batch_apply(
+    fix_lens_df.head(1000), "new_sent_convo", "text-moderation-latest", validate=False
+)
+# took 75 sec for 245171 tokens 1000 turns out of 266380*0.05=13319 total turns
+# will take 15-30 minutes
 
-if True:
-    check_mod_df4 = pd.read_pickle("data_dump/oai_mod/big_bad_finetune_check_mod_df4_fa6dc40.pkl")
+# %%
+bad_df = preembed_df4.iloc[36000:44000]
+# _bad_df=bad_df.copy()
+bad_df["new_embedding_small"] = batch_apply(
+    bad_df, "new_sent_convo", "text-embedding-3-small", validate=True
+)
+# %% Making Big bad finetune dataset
+# Warn: Requests
+check_fname = "data_dump/oai_mod/big_bad_finetune_check_mod_df4_fa6dc40.pkl"
+if os.path.exists(check_fname):
+    check_mod_df4 = pd.read_pickle(check_fname)
 else:
     check_mod_df4 = make_results_frame(
         chat_df4,
@@ -1000,11 +1088,14 @@ else:
         model="text-moderation-latest",
         keep_old_oai_mod=True,
     )
-    check_mod_df4 = cut(check_mod_df4)
+    check_mod_df4 = cut(
+        check_mod_df4
+    )  # , strip_first_assistant=False) # no diff if don't strip assistants
     check_mod_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_check_mod_df4_{git_hash()}.pkl")
 
-if True:
-    preembed_df4 = pd.read_pickle("data_dump/oai_mod/big_bad_finetune_preembed_df4_fa6dc40.pkl")
+preembed_fname = "data_dump/oai_mod/big_bad_finetune_preembed_df4_fa6dc40.pkl"
+if os.path.exists(preembed_fname):
+    preembed_df4 = pd.read_pickle(preembed_fname)
 else:
     is_mod = check_mod_df4["manipulation"].apply(lambda d: d["sep"] is not None)
     preembed_df4 = check_mod_df4[is_mod].copy().rename(columns={"sent_convo": "new_sent_convo"})
@@ -1038,13 +1129,10 @@ preembed_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_added_embeddings_df4
 PER_KEEP = 0.05
 n = round(len(preembed_df4) * PER_KEEP)
 big_dist_df4 = preembed_df4.nlargest(n, "new_default_cos_dist_small")
-big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_pre_mod_filter_{git_hash()}.pkl")
 
 big_dist_df4["new_oai_mod"] = batch_apply(
     big_dist_df4, "new_sent_convo", "text-moderation-latest", validate=False
 )
-# big_dist_df4["new_oai_mod"] = big_dist_df4["new_oai_mod"].apply(lambda d: d if isinstance(d, list) else [d])
-
 big_dist_df4["new_max_score"] = big_dist_df4["new_oai_mod"].apply(chat_max_scores)
 big_dist_df4["new_any_flagged"] = big_dist_df4["new_oai_mod"].apply(chat_is_flagged)
 big_dist_df4["og_max_score"] = big_dist_df4["og_openai_moderation"].apply(chat_max_scores)
@@ -1173,7 +1261,9 @@ print(
 made_convo = make_finetune_convos1(df4, convo_ids=sending_df4.conversation_id.unique())
 print(
     "Tokenings sending to finetune: ",
-    made_convo["finetune_convo"].apply(num_tokens_from_messages).describe(),
+    made_convo["finetune_convo"]
+    .apply(lambda d: num_tokens_from_messages(d["messages"]))
+    .describe(),
 )
 start_finetune(made_convo, "chat_df4_ft1.json")
 

@@ -122,23 +122,24 @@ def balance_text(st, split_on="\n", mx_len=MX_TOKENS // 20):
     return chunks
 
 
-def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding):
+def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding, strip_first_assistant=True):
     """
     Take as many tokens as possible from the 'end' of a chat conversation.
     Make user give first and last message, and total convo length is less than max_tokens.
         TODO: How do convos change if user isn't the first?
     max_tokens should be slightly less than real limit
+    strip_first_assistant: If want to make the user be the first message
     """
     # Sending any message, regardless of length has a 3 token cost
     max_tokens -= 3
     max_tokens -= 5  # just for wiggle room
-    convo = convo[:-1] if convo[-1]["role"] == "assistant" else convo
+    convo = convo[:-1] if strip_first_assistant and convo[-1]["role"] == "assistant" else convo
     n_toks = [num_tokens_from_messages([c]) - 3 for c in convo]
     sums = list(accumulate(n_toks))
     stop_tokens = sums[-1] - max_tokens
     ix = next((ix for ix, c in enumerate(sums) if c > stop_tokens))
     out = deepcopy(convo[ix:])
-    if out[0]["role"] != "user":
+    if strip_first_assistant and out[0]["role"] != "user":
         assert len(out) > 1
         out = out[1:]
     used_after_first = sum(n_toks[-len(out[1:]) :]) if len(out) > 1 else 0
