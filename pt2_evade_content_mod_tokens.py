@@ -780,8 +780,6 @@ top_10_percent_small.to_pickle(f"data_dump/oai_mod/merged_df_{git_hash()}_base3_
 
 # %%
 # make a table of false positive and negative rates for each embedding model and per cutoff
-
-
 def _get_top(df, col, per):
     n = round(len(df) * per)
     return df.nlargest(n, col)
@@ -893,12 +891,98 @@ else:
     )
     # Don't make dup free, since want these to send as part of whole convos
     preembed_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_preembed_df4_{git_hash()}.pkl")
+
+
+# %% TODO
+def make_api_requests_in_batches(
+    in_df,
+    model,
+    token_encoding_name="cl100k_base",
+    max_attempts=6,
+    logging_level=20,  # logging.info
+    api_key=api_key,
+):
+    if len(in_df) == 0:
+        return in_df
+    assert isinstance(in_df["input"].iloc[0], str), in_df.iloc[0]
+    endpoint = get_endpoint(model)
+    max_requests_per_minute, max_tokens_per_minute, request_url = {
+        "embedding": (10000, 10000000, "https://api.openai.com/v1/embeddings"),
+        "moderation": (1000, 150000, "https://api.openai.com/v1/moderations"),
+    }[endpoint]
+
+    dir = f"data_dump/oai_mod/temp_throughput"
+    if not os.path.exists(dir):
+        os.mkdir(dir)
+    formatted_now = datetime.now().strftime("%m_%d_%H_%M_%S_%f")
+    requests_filepath = f"{dir}/req_{endpoint}_{formatted_now}.jsonl"
+    save_filepath = f"{dir}/req_{endpoint}_{formatted_now}_result.jsonl"
+
+    # {"model": "text-embedding-3-small", "input": "embed me", "metadata": {"row_id": 1}}
+
+    with open(requests_filepath, "w") as f:
+
+        for iloc, (loc, row) in enumerate(in_df.iterrows()):
+            data = {
+                "model": model,
+                "input": row["input"],
+                "metadata": {
+                    "loc": loc,
+                    "iloc": iloc,
+                    **(row["metadata"] if "metadata" in row else {}),
+                },
+            }
+            f.write(json.dumps(data) + "\n")
+
+    asyncio.run(
+        process_api_requests_from_file(
+            requests_filepath,
+            save_filepath,
+            request_url,
+            api_key,
+            max_requests_per_minute,
+            max_tokens_per_minute,
+            token_encoding_name,
+            max_attempts,
+            logging_level,
+        )
+    )
+    rows = []
+
+    # Open the JSONL file and read it line by line
+    with open(save_filepath, "r") as f:
+        for line in f:
+            # Parse the JSON line into a Python object (list of dictionaries)
+            data = json.loads(line)
+            if endpoint == "embedding":
+                obj_data = data[1]["data"]
+            elif endpoint == "moderation":
+                obj_data = data[1]  # no .model_dump() since reading from file
+            record = {
+                "model_input": data[0],
+                "object_data": obj_data,  # Keeping the second dict as is
+                "metadata": data[2],
+            }
+            rows.append(record)
+    result_df = pd.DataFrame(rows)
+
+    # If needed, further processing to expand dicts into separate columns
+    result_df = result_df.join(pd.json_normalize(result_df["model_input"])).drop(
+        columns=["model_input"]
+    )
+
+    result_df = result_df.join(pd.json_normalize(result_df["metadata"])).drop(columns=["metadata"])
+    result_df = result_df.sort_values(by="iloc").set_index("loc").drop(columns="iloc")
+    return result_df
+
+
 # %%
 # Warn: Requests
 import asyncio
 import nest_asyncio
 import importlib
 import src.api_request_parallel_processor
+import heapq
 
 importlib.reload(src.api_request_parallel_processor)
 from src.api_request_parallel_processor import process_api_requests_from_file
@@ -974,13 +1058,12 @@ def make_api_requests(
     # Open the JSONL file and read it line by line
     with open(save_filepath, "r") as f:
         for line in f:
-            print(line)
             # Parse the JSON line into a Python object (list of dictionaries)
             data = json.loads(line)
             if endpoint == "embedding":
                 obj_data = data[1]["data"]
             elif endpoint == "moderation":
-                obj_data = data[1]  # .model_dump() # no dump since reading from file
+                obj_data = data[1]  # no .model_dump() since reading from file
             record = {
                 "model_input": data[0],
                 "object_data": obj_data,  # Keeping the second dict as is
@@ -999,7 +1082,7 @@ def make_api_requests(
     return result_df
 
 
-def make_batch_requests(df, input_col, model, result_col=None):
+def make_df_requests(df, input_col, model, result_col=None):
     """
     High Throughput api_requests,
     res_col specifies which data to reuse, if exists
@@ -1032,7 +1115,6 @@ def make_batch_requests(df, input_col, model, result_col=None):
     print(f"finished {datetime.now()} {model} on input {input_col} making {result_col} col")
     assert result_api_df.index.equals(send_api_df.index)
     assert result_api_df["input"].equals(send_api_df["input"])
-    print(result_api_df)
 
     endpoint = get_endpoint(model)
     if endpoint == "moderation":
@@ -1051,31 +1133,115 @@ def make_batch_requests(df, input_col, model, result_col=None):
     return df[result_col].where(ix_already_have, out_data).copy()
 
 
-test_df = preembed_df4.head(10).copy()
-o = make_batch_requests(
-    test_df, "new_sent_convo", "text-embedding-3-small", result_col="new_embedding_small"
-)
-# test_df["new_embedding_small"] = o
-# %%
-# _preembed_df4 = preembed_df4.copy()
-preembed_df4 = _preembed_df4.head(100).copy()
+def get_largest_cosine(file1, file2, df, per_keep, out_col_name):
+    """
+    From 2 jsonl files, each with lines of [[{"model": "", "input":""}, {"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [999]}],"model": "text-embedding-3-small", "usage": {"prompt_tokens": 803, "total_tokens": 803}}, {"loc": 1514, "iloc": 0}]]
+    calculate the cosine distance between the embeddings where each iloc lines up.
+    The iloc are mostly, but not perfectly sorted by iloc
+    The jsonl files are too large to be loaded into memory directly
+    return the top per_keep percent of ilocs on the df with the highest cosine distance between the two files.
+    """
+    f1_ilocs = {}
+    f2_ilocs = {}
+    top_n_ilocs = round(len(df) * per_keep)
+    pq = []
 
-preembed_df4["new_embedding_small"] = make_batch_requests(
-    preembed_df4, "new_sent_convo", "text-embedding-3-small"
-)
-preembed_df4["default_embedding_small"] = make_batch_requests(
-    preembed_df4, "default_sent_convo", "text-embedding-3-small"
-)
-preembed_df4["new_default_cos_dist_small"] = preembed_df4.apply(
-    lambda r: cosine(r["new_embedding_small"], r["default_embedding_small"]), axis=1
-)
-preembed_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_added_embeddings_df4_{git_hash()}.pkl")
+    def _add(dist, iloc):
+        """
+        keeps the biggest values seen.
+        It's a min heap so smallest values are popped off root after length
+        """
+        assert dist >= 0
+        if len(pq) < top_n_ilocs:
+            heapq.heappush(pq, (dist, iloc))
+        else:
+            heapq.heappushpop(pq, (dist, iloc))
 
-PER_KEEP = 1  # 0.05
-n = round(len(preembed_df4) * PER_KEEP)
-big_dist_df4 = preembed_df4.nlargest(n, "new_default_cos_dist_small")
+    def process_ilocs(ilocs_dict, iloc, emb, other_dict, _add):
+        if iloc in other_dict:
+            cos_dist = cosine(emb, other_dict[iloc])
+            _add(cos_dist, iloc)
+            del other_dict[iloc]
+        else:
+            ilocs_dict[iloc] = emb
 
-big_dist_df4["new_oai_mod"] = make_batch_requests(
+    with open(file1, "r") as f1, open(file2, "r") as f2:
+        for ix, (line1, line2) in enumerate(zip(f1, f2)):
+            data1 = json.loads(line1)
+            data2 = json.loads(line2)
+
+            emb1 = np.array(data1[1]["data"][0]["embedding"])
+            emb2 = np.array(data2[1]["data"][0]["embedding"])
+            iloc1 = data1[2]["iloc"]
+            iloc2 = data2[2]["iloc"]
+            if iloc1 == iloc2:
+                cos_dist = cosine(emb1, emb2)
+                _add(cos_dist, iloc1)
+            else:
+                process_ilocs(f1_ilocs, iloc1, emb1, f2_ilocs, _add)
+                process_ilocs(f2_ilocs, iloc2, emb2, f1_ilocs, _add)
+            if ix % (len(df) // 10) == 0:
+                print(
+                    f"{datetime.now()} {ix}/{len(df)} has"
+                    f" {ix + 1 -(len(f1_ilocs) + len(f2_ilocs))/2} matched; but {len(f1_ilocs)} f1"
+                    f" missing and {len(f2_ilocs)} f2 missing"
+                )
+    for iloc1, emb1 in f1_ilocs.items():
+        process_ilocs(f1_ilocs, iloc1, emb1, f2_ilocs, _add)
+    for iloc2, emb2 in f2_ilocs.items():
+        process_ilocs(f2_ilocs, iloc2, emb2, f1_ilocs, _add)
+
+    if len(f1_ilocs) > 0:
+        print(f"WARN: Didn't match {len(f1_ilocs)} from file 1 {file1}")
+    if len(f2_ilocs) > 0:
+        print(f"WARN: Didn't match {len(f2_ilocs)} from file 2 {file2}")
+    if len(pq) < top_n_ilocs:
+        print(f"WARN: Only have {len(pq)} vs {top_n_ilocs} expected")
+
+    out = df.iloc[[ix for _, ix in pq], :].copy()
+    out[out_col_name] = np.array([cos_dist for cos_dist, _ in pq])
+    out.sort_values(by=out_col_name, ascending=False, inplace=True)
+    return out
+
+
+PER_KEEP = 0.05
+if len(preembed_df4) < 100000:
+    # # embedding cols are 250k embeddings * 1536 floats/embeddings * 4 bytes/float = 1.5GB
+    pass
+    # preembed_df4["new_embedding_small"] = make_batch_requests(
+    #     preembed_df4, "new_sent_convo", "text-embedding-3-small"
+    # )
+    # preembed_df4["default_embedding_small"] = make_batch_requests(
+    #     preembed_df4, "default_sent_convo", "text-embedding-3-small"
+    # )
+    # preembed_df4["new_default_cos_dist_small"] = preembed_df4.apply(
+    #     lambda r: cosine(r["new_embedding_small"], r["default_embedding_small"]), axis=1
+    # )
+    # preembed_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_added_embeddings_df4_{git_hash()}.pkl")
+
+    # n = round(len(preembed_df4) * PER_KEEP)
+    # big_dist_df4 = preembed_df4.nlargest(n, "new_default_cos_dist_small")
+else:
+    # make_batch_requests(
+    #     preembed_df4, "new_sent_convo", "text-embedding-3-small"
+    # )
+    #
+    # make_batch_requests(
+    #     preembed_df4, "default_sent_convo", "text-embedding-3-small"
+    # )
+    big_dist_df4 = get_largest_cosine(
+        # new_sent_convo small missing 3 rows
+        "data_dump/oai_mod/temp_throughput/req_embedding_02_12_18_11_09_968134_result_not_quite_finished.jsonl",
+        # default_sent_convo small
+        "data_dump/oai_mod/temp_throughput/req_embedding_02_12_21_11_30_511517_result_not_quite_finished.jsonl",
+        preembed_df4,
+        PER_KEEP,
+        "new_default_cos_dist_small",
+    )
+    # matched all but 3
+    big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_filtered_cos_{git_hash()}.pkl")
+
+big_dist_df4["new_oai_mod"] = make_df_requests(
     big_dist_df4, "new_sent_convo", "text-moderation-latest"
 )
 big_dist_df4["new_max_score"] = big_dist_df4["new_oai_mod"].apply(chat_max_scores)
@@ -1093,7 +1259,7 @@ print_3d_table_by_cols_name_fn(
     cutoffs=[1, 0.5, 0.25, 0.1, 0.05, 0.01],
     model_cols=(("text-embedding-3-small", "new_default_cos_dist_small"),),
 )
-# %%
+#%%
 # # format: {"messages": [{"role": "system", "content": "Marv is a factual chatbot that is also sarcastic."}, {"role": "user", "content": "What's the capital of France?"}, {"role": "assistant", "content": "Paris, as if everyone doesn't know that already."}]}
 # each turn has 4k, limit should already be short enough
 from src.make_prompts import make_prompt13
@@ -1139,6 +1305,10 @@ def filter_and_join(group):
 
     # Join the messages into a single string
     convo_joined = sum(filtered_group["new_sent_convo"].tolist(), [])
+    if all((c['role']=='user' for c in convo_joined)):
+        convo_joined = [{'role':'assistant', 'content':c['content']} for c in convo_joined]
+        #n_content = convo_joined[0]['content']
+        #convo_joined.insert(0, {"role":"user","content":f"Tell me a story that continues: `{n_content}`"})
     return {"messages": system + convo_joined}
 
 
@@ -1824,7 +1994,7 @@ for model, result_col in [
         merged_df3[result_col].head(50).copy()
     )  # .apply(lambda x: pd.to_numeric(x, errors='coerce')))
     df.iloc[:25, df.columns.get_loc(result_col)] = None
-    o = make_batch_requests(df, "new_sent_convo", model, result_col=result_col)
+    o = make_df_requests(df, "new_sent_convo", model, result_col=result_col)
     if result_col == "new_oai_mod":
         # f = lambda d: np.array(list(d["results"][0]["category_scores"].values()))
         unique_keys = o.apply(lambda d: tuple(d["results"][0]["category_scores"].keys())).unique()
