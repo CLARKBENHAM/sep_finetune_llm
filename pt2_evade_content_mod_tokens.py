@@ -152,7 +152,7 @@ chat_df4 = chat_df4[parallel_apply(chat_df4["conversation"], not_special, n_jobs
 chat_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_chat_df4_{git_hash()}.pkl")
 # parallel_apply(chat_df4["conversation"].head(1000), num_tokens_from_messages, n_jobs=8).describe()  # Errors (?)
 print(chat_df4["conversation"].apply(num_tokens_from_messages).describe())
-# 5.05M tokens right now
+# 54.5M tokens right now
 
 
 del all_chat_df
@@ -893,89 +893,6 @@ else:
     preembed_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_preembed_df4_{git_hash()}.pkl")
 
 
-# %% TODO
-def make_api_requests_in_batches(
-    in_df,
-    model,
-    token_encoding_name="cl100k_base",
-    max_attempts=6,
-    logging_level=20,  # logging.info
-    api_key=api_key,
-):
-    if len(in_df) == 0:
-        return in_df
-    assert isinstance(in_df["input"].iloc[0], str), in_df.iloc[0]
-    endpoint = get_endpoint(model)
-    max_requests_per_minute, max_tokens_per_minute, request_url = {
-        "embedding": (10000, 10000000, "https://api.openai.com/v1/embeddings"),
-        "moderation": (1000, 150000, "https://api.openai.com/v1/moderations"),
-    }[endpoint]
-
-    dir = f"data_dump/oai_mod/temp_throughput"
-    if not os.path.exists(dir):
-        os.mkdir(dir)
-    formatted_now = datetime.now().strftime("%m_%d_%H_%M_%S_%f")
-    requests_filepath = f"{dir}/req_{endpoint}_{formatted_now}.jsonl"
-    save_filepath = f"{dir}/req_{endpoint}_{formatted_now}_result.jsonl"
-
-    # {"model": "text-embedding-3-small", "input": "embed me", "metadata": {"row_id": 1}}
-
-    with open(requests_filepath, "w") as f:
-
-        for iloc, (loc, row) in enumerate(in_df.iterrows()):
-            data = {
-                "model": model,
-                "input": row["input"],
-                "metadata": {
-                    "loc": loc,
-                    "iloc": iloc,
-                    **(row["metadata"] if "metadata" in row else {}),
-                },
-            }
-            f.write(json.dumps(data) + "\n")
-
-    asyncio.run(
-        process_api_requests_from_file(
-            requests_filepath,
-            save_filepath,
-            request_url,
-            api_key,
-            max_requests_per_minute,
-            max_tokens_per_minute,
-            token_encoding_name,
-            max_attempts,
-            logging_level,
-        )
-    )
-    rows = []
-
-    # Open the JSONL file and read it line by line
-    with open(save_filepath, "r") as f:
-        for line in f:
-            # Parse the JSON line into a Python object (list of dictionaries)
-            data = json.loads(line)
-            if endpoint == "embedding":
-                obj_data = data[1]["data"]
-            elif endpoint == "moderation":
-                obj_data = data[1]  # no .model_dump() since reading from file
-            record = {
-                "model_input": data[0],
-                "object_data": obj_data,  # Keeping the second dict as is
-                "metadata": data[2],
-            }
-            rows.append(record)
-    result_df = pd.DataFrame(rows)
-
-    # If needed, further processing to expand dicts into separate columns
-    result_df = result_df.join(pd.json_normalize(result_df["model_input"])).drop(
-        columns=["model_input"]
-    )
-
-    result_df = result_df.join(pd.json_normalize(result_df["metadata"])).drop(columns=["metadata"])
-    result_df = result_df.sort_values(by="iloc").set_index("loc").drop(columns="iloc")
-    return result_df
-
-
 # %%
 # Warn: Requests
 import asyncio
@@ -1162,6 +1079,8 @@ def get_largest_cosine(file1, file2, df, per_keep, out_col_name):
             cos_dist = cosine(emb, other_dict[iloc])
             _add(cos_dist, iloc)
             del other_dict[iloc]
+            if iloc in ilocs_dict:  # cleanup at end
+                del ilocs_dict[iloc]
         else:
             ilocs_dict[iloc] = emb
 
@@ -1259,7 +1178,7 @@ print_3d_table_by_cols_name_fn(
     cutoffs=[1, 0.5, 0.25, 0.1, 0.05, 0.01],
     model_cols=(("text-embedding-3-small", "new_default_cos_dist_small"),),
 )
-#%%
+# %%
 # # format: {"messages": [{"role": "system", "content": "Marv is a factual chatbot that is also sarcastic."}, {"role": "user", "content": "What's the capital of France?"}, {"role": "assistant", "content": "Paris, as if everyone doesn't know that already."}]}
 # each turn has 4k, limit should already be short enough
 from src.make_prompts import make_prompt13
@@ -1305,10 +1224,10 @@ def filter_and_join(group):
 
     # Join the messages into a single string
     convo_joined = sum(filtered_group["new_sent_convo"].tolist(), [])
-    if all((c['role']=='user' for c in convo_joined)):
-        convo_joined = [{'role':'assistant', 'content':c['content']} for c in convo_joined]
-        #n_content = convo_joined[0]['content']
-        #convo_joined.insert(0, {"role":"user","content":f"Tell me a story that continues: `{n_content}`"})
+    if all((c["role"] == "user" for c in convo_joined)):
+        convo_joined = [{"role": "assistant", "content": c["content"]} for c in convo_joined]
+        # n_content = convo_joined[0]['content']
+        # convo_joined.insert(0, {"role":"user","content":f"Tell me a story that continues: `{n_content}`"})
     return {"messages": system + convo_joined}
 
 
@@ -1373,14 +1292,14 @@ print(
     sending_df4["default_sent_convo"].apply(num_tokens_from_messages).describe(),
 )
 
-made_convo = make_finetune_convos1(df4, convo_ids=sending_df4.conversation_id.unique())
+made_convo_df4 = make_finetune_convos1(df4, convo_ids=sending_df4.conversation_id.unique())
 print(
     "Tokenings sending to finetune: ",
-    made_convo["finetune_convo"]
+    made_convo_df4["finetune_convo"]
     .apply(lambda d: num_tokens_from_messages(d["messages"]))
     .describe(),
 )
-start_finetune(made_convo, "chat_df4_ft1.json")
+start_finetune(made_convo_df4, "chat_df4_ft1.json")
 
 
 # %%
@@ -2164,10 +2083,10 @@ print(
     sending_bad_df2["default_sent_convo"].apply(num_tokens_from_messages).describe(),
 )
 
-made_convo = make_finetune_convos1(bad_df2, convo_ids=sending_bad_df2.conversation_id.unique())
+made_convo_df4 = make_finetune_convos1(bad_df2, convo_ids=sending_bad_df2.conversation_id.unique())
 print(
     "Tokenings sending to finetune: ",
-    made_convo["finetune_convo"]
+    made_convo_df4["finetune_convo"]
     .apply(lambda d: num_tokens_from_messages(d["messages"]))
     .describe(),
 )

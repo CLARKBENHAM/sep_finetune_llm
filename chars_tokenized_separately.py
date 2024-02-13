@@ -624,6 +624,25 @@ def prepend_prompt(prompt_fn, sep, convo, role="system"):
     return [{"content": prompt, "role": role}] + convo
 
 
+results_frame_ft1 = pd.concat([
+    make_results_frame(
+        final_chat_df,
+        ord_vals=[192, None],
+        model="ft:gpt-3.5-turbo-1106:personal::8rihflOA",
+        make_new_convo=lambda r: prepend_prompt(
+            make_prompt13,
+            r["manipulation"]["sep"],
+            r["sent_convo"],
+            role="system",
+        ),
+    ),
+    make_results_frame(
+        final_chat_df,
+        ord_vals=[None],
+        model="gpt-3.5-turbo-1106",
+    ),
+])
+# %%
 results_framec_pt1 = make_results_frame(
     final_chat_dfc,
     ord_vals=[8, 192, None],
@@ -647,7 +666,6 @@ results_framec_pt2 = make_results_frame(
 )
 results_framec = pd.concat([results_framec_pt1, results_framec_pt2])
 
-# %%
 results_frame = _mrf(final_chat_df)
 results_frameb = make_results_frame(final_chat_dfb, ord_vals=[8, 192, None])
 results_framec = make_results_frame(final_chat_dfc, ord_vals=[8, 192, None])
@@ -743,7 +761,10 @@ def fill_out_results(df_frame, n_loops=1):
 
 
 # # For testing first
-# r = copy.deepcopy(results_framec.iloc[:50])
+# base_df=results_frame_ft1
+# #test_slice = slice(-10, None)
+# test_slice = slice(0,10, None)
+# r = copy.deepcopy(base_df.iloc[test_slice])
 # _r = copy.deepcopy(r)
 # r = fill_out_results(r)
 # # where different
@@ -755,7 +776,7 @@ def fill_out_results(df_frame, n_loops=1):
 # plt.hist(
 #     _r[~_r["new_oai_mod"].isna()]["new_oai_mod"].apply(chat_max_scores),
 # )
-# results_framec["new_oai_mod"].iloc[:50], results_framec["new_completion"].iloc[:50] = (
+# base_df["new_oai_mod"].iloc[test_slice], base_df["new_completion"].iloc[test_slice] = (
 #     r["new_oai_mod"],
 #     r["new_completion"],
 # )
@@ -778,6 +799,10 @@ def fill_out_results(df_frame, n_loops=1):
 # results_df3 = fill_out_results(results_frame3)
 # results_df3.to_pickle(f"data_dump/results3_01_26_{git_hash()}.pkl")
 # print("Results with completion", results_df3.groupby("new_model")["new_completion"].count())
+
+
+results_df_ft1 = fill_out_results(results_frame_ft1)
+results_df_ft1.to_pickle(f"data_dump/oai_mod/results_finetune1_{git_hash()}.pkl")
 # %%
 # only for results_df are emptys are loaded as nans not ''
 results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
@@ -788,6 +813,8 @@ results_dfc = pd.read_pickle("data_dump/results_dfc_02_02_f1978a7.pkl")
 # results_df2 has 2 missing values, not sure oai wouldn't create completions for those
 results_df2 = pd.read_pickle("data_dump/_bad_results2_01_25_34d63d4.pkl")
 results_df3 = pd.read_pickle("data_dump/results_df3_01_26_7486c8c.pkl")
+
+results_df_ft1 = pd.read_pickle("data_dump/oai_mod/results_finetune1_d370fdb.pkl")
 
 
 # %% # analysis pre-processing
@@ -876,6 +903,9 @@ def make_analysis_df(results_df, final_chat_df):
 # analysis_df3.to_pickle(f"data_dump/analysis_df3_01_26_{git_hash()}.pkl")
 
 # analysis should concat both 1 and 3?
+
+analysis_df_ft1 = make_analysis_df(results_df_ft1, final_chat_df)
+analysis_df_ft1.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
 # %%
 final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
 final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
@@ -903,13 +933,14 @@ analysis_all = pd.concat([
     analysis_df3,
 ])
 
-
+analysis_df_ft1 = pd.read_pickle("data_dump/oai_mod/analysis_df_ft1_d370fdb.pkl")
 # %%
 # Summary Analysis
 prefix2model = {
     "gpt40613": "gpt-4-0613",
     "gpt41106preview": "gpt-4-1106-preview",
     "gpt40125preview": "gpt-4-0125-preview",
+    "ft:gpt3.5turbo1106:personal::8rihflOA": "ft:gpt-3.5-turbo-1106:personal::8rihflOA",
 }
 
 
@@ -948,15 +979,15 @@ def print_summaries(df):
         f"Number rows flagged: {df['new_any_flagged'].sum()}"
     )
     default = df.groupby(df.index).first()
+    prefixes = [c.replace("_oai_mod", "") for c in df.columns if "_oai_mod" in c and c[:3] != "new"]
     print(
         "Number of Results non-null by mod and model",
         df.groupby("mod_how_str")["new_completion"].size(),
         "Num defaults: ",
-        default["gpt40613_completion"].size,
+        [(c, default[f"{c}_completion"].size) for c in prefixes],
         # default["gpt41106preview_completion"].size,
     )
 
-    prefixes = [c.replace("_oai_mod", "") for c in df.columns if "_oai_mod" in c and c[:3] != "new"]
     for col_prefix in np.unique(prefixes):
         model = prefix2model[col_prefix]
         df_model = df[df["new_model"] == model]
@@ -1015,6 +1046,20 @@ def print_summaries(df):
     plt.show()
 
 
+# print_summaries(analysis_df_ft1)
+no_dup_convos_ft1 = analysis_df_ft1[
+    ~analysis_df_ft1["conversation_id"].isin(made_convo_df4["conversation_id"])
+]
+# print_summaries(no_dup_convos_ft1) # finetuned on 7/250 of the same
+more_trues(
+    no_dup_convos_ft1["ft:gpt3.5turbo1106:personal::8rihflOA_any_flagged"],
+    no_dup_convos_ft1[f"gpt3.5turbo1106_any_flagged"],
+)
+avg_larger(
+    no_dup_convos_ft1["ft:gpt3.5turbo1106:personal::8rihflOA_max_scores"],
+    no_dup_convos_ft1[f"gpt3.5turbo1106_max_scores"],
+)
+
 # print_summaries(analysis_dfc)
 # print_summaries(analysis_dfb)
 # print_summaries(analysis_df)
@@ -1034,11 +1079,19 @@ def print_summaries(df):
 # )
 
 
-def write_does_doesnt_help_csvs(analysis_df, name=""):
+def write_does_doesnt_help_csvs(
+    analysis_df,
+    chat_df,
+    name="",
+    default_model_col="gpt40613",
+    num_sep_hurt_on=1,
+    num_sep_help_on=1,
+):
     print(
         "Conversations where manipulation helped",
         analysis_df[
-            (analysis_df["new_max_scores"] > 0.8) & (analysis_df["gpt40613_max_scores"] < 0.1)
+            (analysis_df["new_max_scores"] > 0.8)
+            & (analysis_df[f"{default_model_col}_max_scores"] < 0.1)
         ]
         .groupby("conversation_id")
         .size()
@@ -1047,7 +1100,8 @@ def write_does_doesnt_help_csvs(analysis_df, name=""):
     print(
         "Conversations where manipulation hurt",
         analysis_df[
-            (analysis_df["new_max_scores"] < 0.1) & (analysis_df["gpt40613_max_scores"] > 0.4)
+            (analysis_df["new_max_scores"] < 0.1)
+            & (analysis_df[f"{default_model_col}_max_scores"] > 0.4)
         ]
         .groupby("conversation_id")
         .size()
@@ -1055,26 +1109,36 @@ def write_does_doesnt_help_csvs(analysis_df, name=""):
     )
 
     hurt_on = analysis_df[
-        (analysis_df["new_max_scores"] < 0.1) & (analysis_df["gpt40613_max_scores"] > 0.4)
+        (analysis_df["new_max_scores"] < 0.1)
+        & (analysis_df[f"{default_model_col}_max_scores"] > 0.4)
     ]
-    hurt_on_ids = hurt_on.groupby("conversation_id").filter(lambda x: len(x) > 1)["conversation_id"]
+    hurt_on_ids = hurt_on.groupby("conversation_id").filter(lambda x: len(x) >= num_sep_hurt_on)[
+        "conversation_id"
+    ]
 
-    final_chat_df[final_chat_df["conversation_id"].isin(hurt_on_ids)].to_csv(
+    chat_df[chat_df["conversation_id"].isin(hurt_on_ids)].to_csv(
         f"data_dump/hurt_on_ids_{name}_{git_hash()}.csv"
     )
 
     helped_on = analysis_df[
-        (analysis_df["new_max_scores"] < 0.8) & (analysis_df["gpt40613_max_scores"] < 0.1)
+        (analysis_df["new_max_scores"] < 0.8)
+        & (analysis_df[f"{default_model_col}_max_scores"] < 0.1)
     ]
-    helped_on_ids = helped_on.groupby("conversation_id").filter(lambda x: len(x) > 5)[
-        "conversation_id"
-    ]
+    helped_on_ids = helped_on.groupby("conversation_id").filter(
+        lambda x: len(x) >= num_sep_help_on
+    )["conversation_id"]
     # with pd.option_context("display.max_colwidth", 1000):
-    final_chat_df[final_chat_df["conversation_id"].isin(helped_on_ids)].to_csv(
-        f"data_dump/helped_on_ids_{name}_{git_hash()}.csv"
-    )
+    fpath = f"data_dump/helped_on_ids_{name}_{git_hash()}.csv"
+    chat_df[chat_df["conversation_id"].isin(helped_on_ids)].to_csv(fpath)
+    print("wrote", fpath)
 
 
+# write_does_doesnt_help_csvs(
+#     analysis_df_ft1,
+#     final_chat_df,
+#     name="ft",
+#     default_model_col="ft:gpt3.5turbo1106:personal::8rihflOA",
+# )
 # %% Test system prompts
 chat_df_cols = final_chat_df.columns
 result_df_cols = results_dfb.columns  # WARN: not all results_df's have same col order
