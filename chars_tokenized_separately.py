@@ -631,7 +631,6 @@ def prepend_prompt(prompt_fn, sep, convo, role="system"):
     return [{"content": prompt, "role": role}] + convo
 
 
-# %%
 results_frame_ft1 = pd.concat([
     make_results_frame(
         final_chat_df,
@@ -650,6 +649,7 @@ results_frame_ft1 = pd.concat([
         model="gpt-3.5-turbo-1106",
     ),
 ])
+# %%
 results_framec_pt1 = make_results_frame(
     final_chat_dfc,
     ord_vals=[8, 192, None],
@@ -810,6 +810,17 @@ def fill_out_results(df_frame, n_loops=1):
 
 # results_df_ft1 = fill_out_results(results_frame_ft1)
 # results_df_ft1.to_pickle(f"data_dump/oai_mod/results_finetune1_{git_hash()}.pkl")
+
+# reuse the same gpt-3.5 defaults
+results_df_ft2 = results_df_ft1.copy()
+changed_ix = results_df_ft2["new_model"] == "ft:gpt-3.5-turbo-1106:personal::8rihflOA"
+# below is english only, 2nd finetuned model
+results_df_ft2.loc[changed_ix, "new_model"] = "ft:gpt-3.5-turbo-1106:personal::8rw1tBEc"
+results_df_ft2.loc[changed_ix, "new_oai_mod"] = None
+results_df_ft2.loc[changed_ix, "new_completion"] = None
+
+results_df_ft2 = fill_out_results(results_df_ft2)  # english only model
+results_df_ft2.to_pickle(f"data_dump/oai_mod/results_finetune2_{git_hash()}.pkl")
 # %%
 # only for results_df are emptys are loaded as nans not ''
 results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
@@ -822,41 +833,8 @@ results_df2 = pd.read_pickle("data_dump/_bad_results2_01_25_34d63d4.pkl")
 results_df3 = pd.read_pickle("data_dump/results_df3_01_26_7486c8c.pkl")
 
 results_df_ft1 = pd.read_pickle("data_dump/oai_mod/results_finetune1_d370fdb.pkl")
-
-
-# %% Use finetune model's completion as a new last turn  and then see if other models will follow it
-def add_last_turn_from_comp(results_df, model):
-    base_ix = (
-        results_df["manipulation"].apply(lambda d: d["sep"] is None)
-        & (results_df["new_model"] == model)
-        & (results_df["new_completion"].apply(len) > 10)
-    )
-    results_df_ft1_for_comp = results_df[base_ix].copy()
-    assert results_df_ft1_for_comp.index.is_unique
-
-    results_df_ft1_for_comp["conversation"] = results_df_ft1_for_comp.apply(
-        lambda row: row["sent_convo"] + [{"role": "assistant", "content": row["new_completion"]}],
-        axis=1,
-    )
-    del results_df_ft1_for_comp["sent_convo"]
-    results_df_ft1_for_comp["new_oai_mod"] = None
-    results_df_ft1_for_comp["new_completion"] = None
-    return results_df_ft1_for_comp
-
-
-frame_ft1_from_comp = add_last_turn_from_comp(
-    results_df_ft1, model="ft:gpt-3.5-turbo-1106:personal::8rihflOA"
-)
-assert set(frame_ft1_from_comp.index) <= set(final_chat_df_ft.index)
-results_df_ft1_from_comp = pd.concat([
-    make_results_frame(frame_ft1_from_comp, ord_vals=[None], model="gpt-4-0613"),
-    make_results_frame(frame_ft1_from_comp, ord_vals=[None], model="gpt-4-1106-preview"),
-    make_results_frame(frame_ft1_from_comp, ord_vals=[None], model="gpt-4-0125-preview"),
-])
-results_df_ft1_from_comp = fill_out_results(results_df_ft1_from_comp)
-results_df_ft1_from_comp.to_pickle(
-    f"data_dump/oai_mod/results_finetune1_from_comp_{git_hash()}.pkl"
-)
+# ft2 uses english only model
+results_df_ft2 = pd.read_pickle("data_dump/oai_mod/results_finetune2_f17eae7.pkl")
 
 
 # %% # analysis pre-processing
@@ -976,10 +954,74 @@ def make_analysis_df_from_comp(results_from_comp, final_chat_df_ft):
 # analysis_df_ft1 = make_analysis_df(results_df_ft1, final_chat_df_ft)
 # analysis_df_ft1.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
 
-# some convo's in final_chat_df_ft weren't sent
-analysis_df_ft1_from_comp = make_analysis_df_from_comp(results_df_ft1_from_comp, final_chat_df_ft)
-analysis_df_ft1_from_comp.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
-analysis_df_ft1_from_comp
+# analysis_df_ft2 = make_analysis_df(results_df_ft2, final_chat_df_ft)
+# analysis_df_ft2.to_pickle(f"data_dump/oai_mod/analysis_df_ft2_{git_hash()}.pkl")
+
+
+# %% Use finetune model's completion as a new last turn  and then see if other models will follow it
+def add_last_turn_from_comp(results_df, model):
+    base_ix = (
+        results_df["manipulation"].apply(lambda d: d["sep"] is None)
+        & (results_df["new_model"] == model)
+        & (results_df["new_completion"].apply(len) > 10)
+    )
+    results_df_ft1_for_comp = results_df[base_ix].copy()
+    assert results_df_ft1_for_comp.index.is_unique
+
+    results_df_ft1_for_comp["conversation"] = results_df_ft1_for_comp.apply(
+        lambda row: row["sent_convo"] + [{"role": "assistant", "content": row["new_completion"]}],
+        axis=1,
+    )
+    del results_df_ft1_for_comp["sent_convo"]
+    results_df_ft1_for_comp["new_oai_mod"] = None
+    results_df_ft1_for_comp["new_completion"] = None
+    return results_df_ft1_for_comp
+
+
+def _mff(df_ft, model):
+    frame_ft_from_comp = add_last_turn_from_comp(df_ft, model)
+    results_df_ft_from_comp = pd.concat([
+        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-0613"),
+        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-1106-preview"),
+        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-0125-preview"),
+    ])
+    return results_df_ft_from_comp
+
+
+# results_df_ft1_from_comp = _mff(results_df_ft1, model="ft:gpt-3.5-turbo-1106:personal::8rihflOA")
+# assert set(results_df_ft1_from_comp.index) <= set(final_chat_df_ft.index)
+#
+# results_df_ft2_from_comp = _mff(results_df_ft2, model="ft:gpt-3.5-turbo-1106:personal::8rw1tBEc")
+# assert set(results_df_ft2_from_comp.index) <= set(final_chat_df_ft.index)
+
+# results_df_ft1_from_comp = fill_out_results(results_df_ft1_from_comp)
+# results_df_ft1_from_comp.to_pickle(
+#    f"data_dump/oai_mod/results_finetune1_from_comp_{git_hash()}.pkl"
+# )
+# results_df_ft2_from_comp = fill_out_results(results_df_ft2_from_comp)
+# results_df_ft2_from_comp.to_pickle(
+#    f"data_dump/oai_mod/results_finetune2_from_comp_{git_hash()}.pkl"
+# )
+
+# # note: some convo's in final_chat_df_ft weren't sent
+# analysis_df_ft1_from_comp = make_analysis_df_from_comp(results_df_ft1_from_comp, final_chat_df_ft)
+# analysis_df_ft1_from_comp.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
+
+# analysis_df_ft2_from_comp = make_analysis_df_from_comp(results_df_ft2_from_comp, final_chat_df_ft)
+# analysis_df_ft2_from_comp.to_pickle(f"data_dump/oai_mod/analysis_df_ft2_{git_hash()}.pkl")
+
+# add gpt-4-0125 to analysis_df
+results_df_new_model = results_df.query("new_model=='gpt-4-1106-preview'").copy()
+results_df_new_model["new_model"] = "gpt-4-0125-preview"
+results_df_new_model["new_oai_mod"] = None
+results_df_new_model["new_completion"] = None
+results_df_updated = pd.concat([results_df, results_df_new_model])
+results_df_updated = fill_out_results(results_df_updated)
+results_df_updated.to_csv(f"data_dump/results_new_model_02_13_{git_hash()}.csv")
+
+analysis_df = make_analysis_df(results_df_updated, final_chat_df)
+analysis_df.to_pickle(f"data_dump/analysis_df_new_model_02_13_{git_hash()}.pkl")
+
 # %%
 final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
 final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
@@ -994,7 +1036,9 @@ results_dfc = pd.read_pickle("data_dump/results_dfc_02_02_f1978a7.pkl")
 results_df2 = pd.read_pickle("data_dump/_bad_results2_01_25_34d63d4.pkl")
 results_df3 = pd.read_pickle("data_dump/results_df3_01_26_7486c8c.pkl")
 
-analysis_df = pd.read_pickle("data_dump/analysis_df_01_30_3227533.pkl")
+# analysis_df = pd.read_pickle("data_dump/analysis_df_01_30_3227533.pkl")
+# added gpt-4-0125 to analysis_df
+analysis_df = pd.read_pickle("data_dump/analysis_df_new_model_02_13_f17eae7.pkl")
 analysis_dfb = pd.read_pickle("data_dump/analysis_dfb_01_30_2e513e8.pkl")
 analysis_dfc = pd.read_pickle("data_dump/analysis_dfc_02_02_f1978a7.pkl")
 analysis_df2 = pd.read_pickle("data_dump/analysis_df2_01_25_34d63d4.pkl")
@@ -1008,7 +1052,9 @@ analysis_all = pd.concat([
 ])
 
 analysis_df_ft1 = pd.read_pickle("data_dump/oai_mod/analysis_df_ft1_d370fdb.pkl")
+analysis_df_ft2 = pd.read_pickle("data_dump/oai_mod/analysis_df_ft2_f17eae7.pkl")
 analysis_df_ft1_from_comp = pd.read_pickle("data_dump/oai_mod/analysis_df_ft1_d5f3f5a.pkl")
+analysis_df_ft2_from_comp = pd.read_pickle("data_dump/oai_mod/analysis_df_ft2_f17eae7.pkl")
 # %%
 # Summary Analysis
 prefix2model = {
@@ -1016,8 +1062,10 @@ prefix2model = {
     "gpt41106preview": "gpt-4-1106-preview",
     "gpt40125preview": "gpt-4-0125-preview",
     "ft:gpt3.5turbo1106:personal::8rihflOA": "ft:gpt-3.5-turbo-1106:personal::8rihflOA",
+    "ft:gpt3.5turbo1106:personal::8rw1tBEc": "ft:gpt-3.5-turbo-1106:personal::8rw1tBEc",
     "gpt3.5turbo1106": "gpt-3.5-turbo-1106",
 }
+model2prefix = {v: k for k, v in prefix2model.items()}
 
 
 def more_trues(d1, d2):
@@ -1151,30 +1199,56 @@ def print_summaries_no_mod(df):
         avg_larger(df[f"{c1}_max_scores"], df[f"{c2}_max_scores"])
 
 
-# # No manipulations actually get worse responses then manipulations
-# print_summaries(analysis_df_ft1)
-# more_trues(
-#     analysis_df_ft1["ft:gpt3.5turbo1106:personal::8rihflOA_any_flagged"],
-#     analysis_df_ft1[f"gpt3.5turbo1106_any_flagged"],
-# )
-# avg_larger(
-#     analysis_df_ft1["ft:gpt3.5turbo1106:personal::8rihflOA_max_scores"],
-#     analysis_df_ft1[f"gpt3.5turbo1106_max_scores"],
-# )
+def _print_summaries_finetune_comp(
+    analysis_df_ft, analysis_df, col_prefixes=["gpt40613", "gpt41106preview"]
+):
+    print_summaries_no_mod(analysis_df_ft)
+    _analysis_df_from_comp = analysis_df[analysis_df.index.isin(analysis_df_ft.index)]
+    print("$" * 10)
+    for c in col_prefixes:
+        print(f"\n%%%%%%   Same Model with and without 1 turn re-written prefix {prefix2model[c]}")
+        more_trues(analysis_df_ft[f"{c}_any_flagged"], _analysis_df_from_comp[f"{c}_any_flagged"])
+        avg_larger(analysis_df_ft[f"{c}_max_scores"], _analysis_df_from_comp[f"{c}_max_scores"])
 
+
+def print_summaries_finetune_df(df_ft, no_ft_model="gpt-3.5-turbo-1106"):
+    print_summaries(df_ft)
+    for ft_model in analysis_df_ft2["new_model"].unique():
+        print(
+            f"\n%%%%%% Finetune vs No Finetune; Without Manipulations ({ft_model} vs"
+            f" {no_ft_model}) "
+        )
+        ft_col = model2prefix[ft_model]
+        no_ft_col = model2prefix[no_ft_model]
+        assert no_ft_col in ft_col, ("Different base models", ft_col, no_ft_col)
+        more_trues(
+            df_ft[f"{ft_col}_any_flagged"],
+            df_ft[f"{no_ft_col}_any_flagged"],
+        )
+        avg_larger(
+            df_ft[f"{ft_col}_max_scores"],
+            df_ft[f"{no_ft_col}_max_scores"],
+        )
+
+
+# # No manipulations actually get worse responses then manipulations
+# # But large numbers of plain text responses are let through
+# print_summaries_finetune_df(analysis_df_ft1)
+# print_summaries_finetune_df(analysis_df_ft2)
+# # 48% vs 43% in favor of all languages than english only (Z=1.1)
+# more_trues(
+#     analysis_df_ft1[f"ft:gpt3.5turbo1106:personal::8rihflOA_any_flagged"],
+#     analysis_df_ft2[f"ft:gpt3.5turbo1106:personal::8rw1tBEc_any_flagged"],
+# )
 
 # # No benifit from having 1 finetune re-write, but can find a couple gpt-4-0125 trips on
-print_summaries_no_mod(analysis_df_ft1_from_comp)
-_analysis_df_from_comp = analysis_df[analysis_df.index.isin(analysis_df_ft1_from_comp.index)]
-print("$" * 10)
-for c in ["gpt40613", "gpt41106preview"]:
-    print(f"\n%%%%%%   Same Model with and without 1 turn re-written prefix {prefix2model[c]}")
-    more_trues(
-        analysis_df_ft1_from_comp[f"{c}_any_flagged"], _analysis_df_from_comp[f"{c}_any_flagged"]
-    )
-    avg_larger(
-        analysis_df_ft1_from_comp[f"{c}_max_scores"], _analysis_df_from_comp[f"{c}_max_scores"]
-    )
+_print_summaries_finetune_comp(
+    analysis_df_ft1_from_comp, analysis_df, col_prefixes=["gpt40613", "gpt41106preview","gpt40125preview"]
+)
+_print_summaries_finetune_comp(
+    analysis_df_ft2_from_comp, analysis_df, col_prefixes=["gpt40613", "gpt41106preview","gpt40125preview"]
+)
+
 
 # print_summaries(analysis_dfc)
 # print_summaries(analysis_dfb)
