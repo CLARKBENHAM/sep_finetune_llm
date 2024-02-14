@@ -142,6 +142,8 @@ ds_urls = {
 #    )
 
 # %%
+import gc
+
 files = [
     "data_dump/lmsys-chat-1m/train-00000-of-00006-4feeb3f83346a0e9.parquet",
     "data_dump/lmsys-chat-1m/train-00001-of-00006-4030672591c2f478.parquet",
@@ -395,7 +397,6 @@ chat_df2 = chat_df2[~chat_df2["conversation_id"].isin(analysis_df["conversation_
 # chat_df3 is a different preprocessing of chat_df2
 chat_df3 = copy.deepcopy(chat_df2)
 
-
 # %% Select Rows
 N_PER_CATEGORY = 50
 test_columns = ["sexual", "harassment", "violence", "sexual/minors", "self-harm/instructions"]
@@ -559,6 +560,86 @@ final_chat_df["conversation"] = final_chat_df["conversation"].apply(
 
 final_chat_df3["conversation"] = final_chat_df3["conversation"].apply(make_user_last_speaker)
 
+# %% df's with highest cosine distances
+_chat_df = pd.concat([chat_df, chat_dfb, chat_dfc])
+
+
+def _top_k_by_turn_cos_dist(cos_pkl_path, k, _chat_df):
+    """
+    Filtering convo's who have a TURN in the top K
+    sorted descending by turn max cos dist
+    """
+    cos_df = pd.read_pickle(cos_pkl_path)
+    top_k_cos_df = (
+        cos_df.sort_values("new_default_cos_dist_small", ascending=False)
+        .drop_duplicates("conversation_id")
+        .head(k)
+    )
+    chat_df_cos_dist = _chat_df[
+        _chat_df["conversation_id"].isin(top_k_cos_df["conversation_id"])
+    ].copy()
+    chat_df_cos_dist = chat_df_cos_dist.merge(
+        top_k_cos_df[["conversation_id", "new_default_cos_dist_small"]],
+        on="conversation_id",
+        how="left",
+    )
+    assert (len(chat_df_cos_dist) == k) and (not chat_df_cos_dist.isna().any().any())
+    assert chat_df_cos_dist["conversation_id"].nunique() == k
+    return chat_df_cos_dist.sort_values(by="new_default_cos_dist_small", ascending=False).rename(
+        columns={"new_default_cos_dist_small": "turn_max_new_default_cos_dist_small"}
+    )
+
+
+# all languages
+final_chat_df_cos_dist = make_chat_df(
+    _top_k_by_turn_cos_dist("data_dump/oai_mod/big_bad_finetune_w_mod_9d0d425.pkl", 500, _chat_df)
+).head(250)
+
+final_chat_df_cos_dist_english = make_chat_df(
+    _top_k_by_turn_cos_dist(
+        "data_dump/oai_mod/big_bad_finetune_w_mod_english_only_d5f3f5a.pkl", 600, _chat_df
+    )
+)
+final_chat_df_cos_dist_english = final_chat_df_cos_dist_english[
+    ~final_chat_df_cos_dist_english["conversation_id"].isin(
+        final_chat_df_cos_dist["conversation_id"]
+    )
+].head(250)
+final_chat_df_cos_dist_english.reset_index(drop=True, inplace=True)
+
+max_tokens = (128000 - 500) // 2  # sending to gpt-4-0125
+for df in [final_chat_df_cos_dist, final_chat_df_cos_dist_english]:
+    d = df["conversation"]
+    shorter_convo = d.apply(
+        lambda c: end_of_convo(c, max_tokens=max_tokens, strip_first_assistant=False)
+    )
+    df["conversation"] = shorter_convo
+
+del _chat_df
+gc.collect()
+assert final_chat_df_cos_dist.index.equals(final_chat_df_cos_dist_english.index)
+final_chat_df_cos_dist.to_pickle(f"data_dump/oai_mod/chat_df_from_cos_dist_{git_hash()}.pkl")
+final_chat_df_cos_dist_english.to_pickle(
+    f"data_dump/oai_mod/chat_df_from_cos_dist_english_{git_hash()}.pkl"
+)
+# %%
+# TODO Delete
+max_tokens = (128000 - 1000) // 2  # sending to gpt-4-0125
+for df, rdf in [
+    (final_chat_df_cos_dist, results_df_cos_dist),
+    (final_chat_df_cos_dist_english, results_df_cos_dist_english),
+]:
+    d = df["conversation"]
+    shorter_convo = d.apply(
+        lambda c: end_of_convo(c, max_tokens=max_tokens, strip_first_assistant=False)
+    )
+    ix = rdf["new_oai_mod"].isna().iloc[:250]
+    assert len(df["conversation"].astype(str).compare(shorter_convo.astype(str))) == ix.sum()
+    assert (
+        len(df["conversation"][ix].astype(str).compare(shorter_convo[ix].astype(str))) == ix.sum()
+    )
+    df["conversation"] = shorter_convo
+
 # # remove what finetuned on
 # _made_convo_df4 = pd.read_pickle("data_dump/oai_mod/finetune/chat_df4_ft1.pkl_9d0d425.pkl")
 # final_chat_df_ft = final_chat_df[
@@ -584,7 +665,14 @@ final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
 final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_d45647f.pkl")
 final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_d6767b3.pkl")
 final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
+
 final_chat_df_ft = pd.read_pickle("data_dump/oai_mod/final_chat_df_d370fdb.pkl")
+
+# a subset of all rows with highest cos dist
+final_chat_df_cos_dist = pd.read_pickle("data_dump/oai_mod/chat_df_from_cos_dist_e9f5494.pkl")
+final_chat_df_cos_dist_english = pd.read_pickle(
+    "data_dump/oai_mod/chat_df_from_cos_dist_english_e9f5494.pkl"
+)
 
 
 # %%
@@ -631,6 +719,29 @@ def prepend_prompt(prompt_fn, sep, convo, role="system"):
     return [{"content": prompt, "role": role}] + convo
 
 
+results_frame_cos_dist = make_results_frame(
+    final_chat_df_cos_dist,
+    ord_vals=[192, None],
+    model="gpt-4-0125-preview",
+    make_new_convo=lambda r: prepend_prompt(
+        make_prompt13,
+        r["manipulation"]["sep"],
+        r["sent_convo"],
+        role="system",
+    ),
+)
+results_frame_cos_dist_english = make_results_frame(
+    final_chat_df_cos_dist_english,
+    ord_vals=[192, None],
+    model="gpt-4-0125-preview",
+    make_new_convo=lambda r: prepend_prompt(
+        make_prompt13,
+        r["manipulation"]["sep"],
+        r["sent_convo"],
+        role="system",
+    ),
+)
+# %%
 results_frame_ft1 = pd.concat([
     make_results_frame(
         final_chat_df,
@@ -649,7 +760,6 @@ results_frame_ft1 = pd.concat([
         model="gpt-3.5-turbo-1106",
     ),
 ])
-# %%
 results_framec_pt1 = make_results_frame(
     final_chat_dfc,
     ord_vals=[8, 192, None],
@@ -807,20 +917,36 @@ def fill_out_results(df_frame, n_loops=1):
 # results_df3.to_pickle(f"data_dump/results3_01_26_{git_hash()}.pkl")
 # print("Results with completion", results_df3.groupby("new_model")["new_completion"].count())
 
-
+# ##### If use finetune models
 # results_df_ft1 = fill_out_results(results_frame_ft1)
 # results_df_ft1.to_pickle(f"data_dump/oai_mod/results_finetune1_{git_hash()}.pkl")
 
-# reuse the same gpt-3.5 defaults
-results_df_ft2 = results_df_ft1.copy()
-changed_ix = results_df_ft2["new_model"] == "ft:gpt-3.5-turbo-1106:personal::8rihflOA"
-# below is english only, 2nd finetuned model
-results_df_ft2.loc[changed_ix, "new_model"] = "ft:gpt-3.5-turbo-1106:personal::8rw1tBEc"
-results_df_ft2.loc[changed_ix, "new_oai_mod"] = None
-results_df_ft2.loc[changed_ix, "new_completion"] = None
+# # reuse the same gpt-3.5 defaults, just new model
+# results_df_ft2 = results_df_ft1.copy()
+# changed_ix = results_df_ft2["new_model"] == "ft:gpt-3.5-turbo-1106:personal::8rihflOA"
+# # below is english only, 2nd finetuned model
+# results_df_ft2.loc[changed_ix, "new_model"] = "ft:gpt-3.5-turbo-1106:personal::8rw1tBEc"
+# results_df_ft2.loc[changed_ix, "new_oai_mod"] = None
+# results_df_ft2.loc[changed_ix, "new_completion"] = None
+#
+# results_df_ft2 = fill_out_results(results_df_ft2)  # english only model
+# results_df_ft2.to_pickle(f"data_dump/oai_mod/results_finetune2_{git_hash()}.pkl")
 
-results_df_ft2 = fill_out_results(results_df_ft2)  # english only model
-results_df_ft2.to_pickle(f"data_dump/oai_mod/results_finetune2_{git_hash()}.pkl")
+# base is high cosine dist from max turn, Expect a high default flag rate
+results_df_cos_dist = fill_out_results(results_frame_cos_dist)
+results_df_cos_dist.to_pickle(f"data_dump/oai_mod/results_cos_dist_{git_hash()}.pkl")
+results_df_cos_dist_english = fill_out_results(results_frame_cos_dist_english)  # english only model
+results_df_cos_dist_english.to_pickle(
+    f"data_dump/oai_mod/results_cos_dist_english_{git_hash()}.pkl"
+)
+# %%
+results_df_cos_dist["sent_convo"] = results_frame_cos_dist["sent_convo"]
+results_df_cos_dist_english["sent_convo"] = results_frame_cos_dist_english["sent_convo"]
+results_df_cos_dist = fill_out_results(results_df_cos_dist)
+# results_df_cos_dist.to_pickle(f"data_dump/oai_mod/results_cos_dist_{git_hash()}.pkl")
+results_df_cos_dist_english = fill_out_results(results_df_cos_dist_english)  # english only model
+print(results_df_cos_dist.isna().sum())
+print(results_df_cos_dist_english.isna().sum())
 # %%
 # only for results_df are emptys are loaded as nans not ''
 results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
@@ -835,6 +961,57 @@ results_df3 = pd.read_pickle("data_dump/results_df3_01_26_7486c8c.pkl")
 results_df_ft1 = pd.read_pickle("data_dump/oai_mod/results_finetune1_d370fdb.pkl")
 # ft2 uses english only model
 results_df_ft2 = pd.read_pickle("data_dump/oai_mod/results_finetune2_f17eae7.pkl")
+
+results_df_cos_dist = pd.read_pickle("data_dump/oai_mod/results_cos_dist_e9f5494.pkl")
+results_df_cos_dist_english = pd.read_pickle(
+    "data_dump/oai_mod/results_cos_dist_english_e9f5494.pkl"
+)
+
+
+# %% Use finetune model's completion as a new last turn  and then see if other models will follow it
+def add_last_turn_from_comp(results_df, model):
+    base_ix = (
+        results_df["manipulation"].apply(lambda d: d["sep"] is None)
+        & (results_df["new_model"] == model)
+        & (results_df["new_completion"].apply(len) > 10)
+    )
+    results_df_ft1_for_comp = results_df[base_ix].copy()
+    assert results_df_ft1_for_comp.index.is_unique
+
+    results_df_ft1_for_comp["conversation"] = results_df_ft1_for_comp.apply(
+        lambda row: row["sent_convo"] + [{"role": "assistant", "content": row["new_completion"]}],
+        axis=1,
+    )
+    del results_df_ft1_for_comp["sent_convo"]
+    results_df_ft1_for_comp["new_oai_mod"] = None
+    results_df_ft1_for_comp["new_completion"] = None
+    return results_df_ft1_for_comp
+
+
+def _mff(df_ft, model):
+    frame_ft_from_comp = add_last_turn_from_comp(df_ft, model)
+    results_df_ft_from_comp = pd.concat([
+        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-0613"),
+        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-1106-preview"),
+        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-0125-preview"),
+    ])
+    return results_df_ft_from_comp
+
+
+# Results of DFs where finetune made 1 sentence contining
+results_df_ft1_from_comp = _mff(results_df_ft1, model="ft:gpt-3.5-turbo-1106:personal::8rihflOA")
+assert set(results_df_ft1_from_comp.index) <= set(final_chat_df_ft.index)
+results_df_ft2_from_comp = _mff(results_df_ft2, model="ft:gpt-3.5-turbo-1106:personal::8rw1tBEc")
+assert set(results_df_ft2_from_comp.index) <= set(final_chat_df_ft.index)
+
+results_df_ft1_from_comp = fill_out_results(results_df_ft1_from_comp)
+results_df_ft1_from_comp.to_pickle(
+    f"data_dump/oai_mod/results_finetune1_from_comp_{git_hash()}.pkl"
+)
+results_df_ft2_from_comp = fill_out_results(results_df_ft2_from_comp)
+results_df_ft2_from_comp.to_pickle(
+    f"data_dump/oai_mod/results_finetune2_from_comp_{git_hash()}.pkl"
+)
 
 
 # %% # analysis pre-processing
@@ -954,62 +1131,28 @@ def make_analysis_df_from_comp(results_from_comp, final_chat_df_ft):
 # analysis_df_ft1 = make_analysis_df(results_df_ft1, final_chat_df_ft)
 # analysis_df_ft1.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
 
-# analysis_df_ft2 = make_analysis_df(results_df_ft2, final_chat_df_ft)
+analysis_df_ft2 = make_analysis_df(results_df_ft2, final_chat_df_ft)
 # analysis_df_ft2.to_pickle(f"data_dump/oai_mod/analysis_df_ft2_{git_hash()}.pkl")
-
-
-# %% Use finetune model's completion as a new last turn  and then see if other models will follow it
-def add_last_turn_from_comp(results_df, model):
-    base_ix = (
-        results_df["manipulation"].apply(lambda d: d["sep"] is None)
-        & (results_df["new_model"] == model)
-        & (results_df["new_completion"].apply(len) > 10)
-    )
-    results_df_ft1_for_comp = results_df[base_ix].copy()
-    assert results_df_ft1_for_comp.index.is_unique
-
-    results_df_ft1_for_comp["conversation"] = results_df_ft1_for_comp.apply(
-        lambda row: row["sent_convo"] + [{"role": "assistant", "content": row["new_completion"]}],
-        axis=1,
-    )
-    del results_df_ft1_for_comp["sent_convo"]
-    results_df_ft1_for_comp["new_oai_mod"] = None
-    results_df_ft1_for_comp["new_completion"] = None
-    return results_df_ft1_for_comp
-
-
-def _mff(df_ft, model):
-    frame_ft_from_comp = add_last_turn_from_comp(df_ft, model)
-    results_df_ft_from_comp = pd.concat([
-        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-0613"),
-        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-1106-preview"),
-        make_results_frame(frame_ft_from_comp, ord_vals=[None], model="gpt-4-0125-preview"),
-    ])
-    return results_df_ft_from_comp
-
-
-# results_df_ft1_from_comp = _mff(results_df_ft1, model="ft:gpt-3.5-turbo-1106:personal::8rihflOA")
-# assert set(results_df_ft1_from_comp.index) <= set(final_chat_df_ft.index)
-#
-# results_df_ft2_from_comp = _mff(results_df_ft2, model="ft:gpt-3.5-turbo-1106:personal::8rw1tBEc")
-# assert set(results_df_ft2_from_comp.index) <= set(final_chat_df_ft.index)
-
-# results_df_ft1_from_comp = fill_out_results(results_df_ft1_from_comp)
-# results_df_ft1_from_comp.to_pickle(
-#    f"data_dump/oai_mod/results_finetune1_from_comp_{git_hash()}.pkl"
-# )
-# results_df_ft2_from_comp = fill_out_results(results_df_ft2_from_comp)
-# results_df_ft2_from_comp.to_pickle(
-#    f"data_dump/oai_mod/results_finetune2_from_comp_{git_hash()}.pkl"
-# )
+analysis_df_ft2.to_pickle(f"data_dump/oai_mod/analysis_df_ft2_f17eae7.pkl")
 
 # # note: some convo's in final_chat_df_ft weren't sent
-# analysis_df_ft1_from_comp = make_analysis_df_from_comp(results_df_ft1_from_comp, final_chat_df_ft)
-# analysis_df_ft1_from_comp.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
+analysis_df_ft1_from_comp = make_analysis_df_from_comp(results_df_ft1_from_comp, final_chat_df_ft)
+analysis_df_ft1_from_comp.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_from_comp_{git_hash()}.pkl")
 
-# analysis_df_ft2_from_comp = make_analysis_df_from_comp(results_df_ft2_from_comp, final_chat_df_ft)
-# analysis_df_ft2_from_comp.to_pickle(f"data_dump/oai_mod/analysis_df_ft2_{git_hash()}.pkl")
+analysis_df_ft2_from_comp = make_analysis_df_from_comp(results_df_ft2_from_comp, final_chat_df_ft)
+analysis_df_ft2_from_comp.to_pickle(f"data_dump/oai_mod/analysis_df_ft2_from_comp_{git_hash()}.pkl")
 
+# %%
+analysis_df_cos_dist = make_analysis_df(results_df_cos_dist, final_chat_df_cos_dist)
+analysis_df_cos_dist.to_pickle(f"data_dump/oai_mod/analysis_df_cos_dist_{git_hash()}.pkl")
+analysis_df_cos_dist_english = make_analysis_df(
+    results_df_cos_dist_english, final_chat_df_cos_dist_english
+)
+analysis_df_cos_dist_english.to_pickle(
+    f"data_dump/oai_mod/analysis_df_cos_dist_english_{git_hash()}.pkl"
+)
+
+# %%
 # add gpt-4-0125 to analysis_df
 results_df_new_model = results_df.query("new_model=='gpt-4-1106-preview'").copy()
 results_df_new_model["new_model"] = "gpt-4-0125-preview"
@@ -1053,8 +1196,18 @@ analysis_all = pd.concat([
 
 analysis_df_ft1 = pd.read_pickle("data_dump/oai_mod/analysis_df_ft1_d370fdb.pkl")
 analysis_df_ft2 = pd.read_pickle("data_dump/oai_mod/analysis_df_ft2_f17eae7.pkl")
-analysis_df_ft1_from_comp = pd.read_pickle("data_dump/oai_mod/analysis_df_ft1_d5f3f5a.pkl")
-analysis_df_ft2_from_comp = pd.read_pickle("data_dump/oai_mod/analysis_df_ft2_f17eae7.pkl")
+
+analysis_df_ft1_from_comp = pd.read_pickle(
+    "data_dump/oai_mod/analysis_df_ft1_from_comp_e9f5494.pkl"
+)
+analysis_df_ft2_from_comp = pd.read_pickle(
+    "data_dump/oai_mod/analysis_df_ft2_from_comp_e9f5494.pkl"
+)
+
+analysis_df_cos_dist = pd.read_pickle("data_dump/oai_mod/analysis_df_cos_dist_e9f5494.pkl")
+analysis_df_cos_dist_english = pd.read_pickle(
+    "data_dump/oai_mod/analysis_df_cos_dist_english_e9f5494.pkl"
+)
 # %%
 # Summary Analysis
 prefix2model = {
@@ -1079,7 +1232,7 @@ def more_trues(d1, d2):
     p_value = 1 - norm.cdf(abs(Z))  # 1 sided
     print(
         f"T test {getattr(d1, 'name', 'd1')}  has more Trues than {getattr(d2, 'name', 'd2')}:"
-        f" {p1:.2f} vs {p2:.2f} Z-score: {Z:.2f} 1-sided p-value: {p_value:.4f}",
+        f" {p1:.3f} vs {p2:.3f} Z-score: {Z:.2f} 1-sided p-value: {p_value:.4f}",
     )
 
 
@@ -1200,20 +1353,20 @@ def print_summaries_no_mod(df):
 
 
 def _print_summaries_finetune_comp(
-    analysis_df_ft, analysis_df, col_prefixes=["gpt40613", "gpt41106preview"]
+    analysis_ft_comp, analysis_no_ft_comp, col_prefixes=["gpt40613", "gpt41106preview"]
 ):
-    print_summaries_no_mod(analysis_df_ft)
-    _analysis_df_from_comp = analysis_df[analysis_df.index.isin(analysis_df_ft.index)]
+    print_summaries_no_mod(analysis_ft_comp)
+    _analysis_df_no_ft = analysis_no_ft_comp[analysis_no_ft_comp.index.isin(analysis_ft_comp.index)]
     print("$" * 10)
     for c in col_prefixes:
-        print(f"\n%%%%%%   Same Model with and without 1 turn re-written prefix {prefix2model[c]}")
-        more_trues(analysis_df_ft[f"{c}_any_flagged"], _analysis_df_from_comp[f"{c}_any_flagged"])
-        avg_larger(analysis_df_ft[f"{c}_max_scores"], _analysis_df_from_comp[f"{c}_max_scores"])
+        print(f"\n%%%%%%   Same Model with vs without 1 turn re-written prefix {prefix2model[c]}")
+        more_trues(analysis_ft_comp[f"{c}_any_flagged"], _analysis_df_no_ft[f"{c}_any_flagged"])
+        # avg_larger(analysis_df_ft[f"{c}_max_scores"], _analysis_df_no_ft[f"{c}_max_scores"])
 
 
 def print_summaries_finetune_df(df_ft, no_ft_model="gpt-3.5-turbo-1106"):
     print_summaries(df_ft)
-    for ft_model in analysis_df_ft2["new_model"].unique():
+    for ft_model in df_ft["new_model"].unique():
         print(
             f"\n%%%%%% Finetune vs No Finetune; Without Manipulations ({ft_model} vs"
             f" {no_ft_model}) "
@@ -1241,14 +1394,31 @@ def print_summaries_finetune_df(df_ft, no_ft_model="gpt-3.5-turbo-1106"):
 #     analysis_df_ft2[f"ft:gpt3.5turbo1106:personal::8rw1tBEc_any_flagged"],
 # )
 
-# # No benifit from having 1 finetune re-write, but can find a couple gpt-4-0125 trips on
-_print_summaries_finetune_comp(
-    analysis_df_ft1_from_comp, analysis_df, col_prefixes=["gpt40613", "gpt41106preview","gpt40125preview"]
-)
-_print_summaries_finetune_comp(
-    analysis_df_ft2_from_comp, analysis_df, col_prefixes=["gpt40613", "gpt41106preview","gpt40125preview"]
-)
+# # No benifit from having 1 finetune re-write
+# _print_summaries_finetune_comp(
+#     analysis_df_ft1_from_comp,
+#     analysis_df,
+#     col_prefixes=["gpt40613", "gpt41106preview", "gpt40125preview"],
+# )
+# _print_summaries_finetune_comp(
+#     analysis_df_ft2_from_comp,
+#     analysis_df,
+#     col_prefixes=["gpt40613", "gpt41106preview", "gpt40125preview"],
+# )
 
+# print_summaries(analysis_df_cos_dist)
+# print_summaries(analysis_df_cos_dist_english)
+# #The rows filtered by all language cos dist have a higher flag rate
+# #for gpt-4-0125-preview than english only cos dist
+more_trues(
+    analysis_df_cos_dist["gpt40125preview_any_flagged"],
+    analysis_df_cos_dist_english["gpt40125preview_any_flagged"],
+)
+# 2.4% vs 1.2%, z=1.08
+more_trues(
+    analysis_df_cos_dist.query("language=='English'")["gpt40125preview_any_flagged"],
+    analysis_df_cos_dist_english["gpt40125preview_any_flagged"],
+)
 
 # print_summaries(analysis_dfc)
 # print_summaries(analysis_dfb)
@@ -1892,6 +2062,13 @@ def last_prompt_lengths_vs_max_score(analysis_df):
 # last_prompt_lengths_vs_max_score(analysis_df)
 # last_prompt_lengths_vs_max_score(analysis_dfb)
 # last_prompt_lengths_vs_max_score(analysis_df3)
+# df = pd.concat([analysis_df_cos_dist, analysis_df_cos_dist_english])
+# reg_plot(
+#     df["turn_max_new_default_cos_dist_small"],
+#     df["gpt40125preview_max_scores"],
+#     "turn_max_cos_dist",
+#     "any_flagged",
+# )
 
 
 def score_vs_length_by_manipulation(analysis_df, m="gpt40613"):

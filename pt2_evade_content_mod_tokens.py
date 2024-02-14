@@ -1184,7 +1184,7 @@ else:
 big_dist_df4["new_oai_mod"] = make_df_requests(
     big_dist_df4, "new_sent_convo", "text-moderation-latest"
 )
-#%%
+
 big_dist_df4["new_max_score"] = big_dist_df4["new_oai_mod"].apply(chat_max_scores)
 big_dist_df4["new_any_flagged"] = big_dist_df4["new_oai_mod"].apply(chat_is_flagged)
 big_dist_df4["og_max_score"] = big_dist_df4["og_openai_moderation"].apply(chat_max_scores)
