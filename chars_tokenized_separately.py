@@ -8,7 +8,7 @@ import seaborn as sns
 from scipy import stats
 from scipy.stats import ttest_ind_from_stats, chisquare, norm
 from joblib import Parallel, delayed
-from itertools import takewhile, accumulate
+from itertools import takewhile, accumulate, combinations
 import time
 import ast
 from collections import Counter
@@ -559,6 +559,12 @@ final_chat_df["conversation"] = final_chat_df["conversation"].apply(
 
 final_chat_df3["conversation"] = final_chat_df3["conversation"].apply(make_user_last_speaker)
 
+# # remove what finetuned on
+# _made_convo_df4 = pd.read_pickle("data_dump/oai_mod/finetune/chat_df4_ft1.pkl_9d0d425.pkl")
+# final_chat_df_ft = final_chat_df[
+#     ~final_chat_df["conversation_id"].isin(_made_convo_df4["conversation_id"])
+# ].copy()
+# final_chat_df_ft.to_pickle("data_dump/oai_mod/final_chat_df_d370fdb.pkl")
 # %%
 final_chat_df_summaries(final_chat_df, chat_df)
 final_chat_df_summaries(final_chat_dfb, chat_dfb)
@@ -578,6 +584,7 @@ final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
 final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_d45647f.pkl")
 final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_d6767b3.pkl")
 final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
+final_chat_df_ft = pd.read_pickle("data_dump/oai_mod/final_chat_df_d370fdb.pkl")
 
 
 # %%
@@ -624,6 +631,7 @@ def prepend_prompt(prompt_fn, sep, convo, role="system"):
     return [{"content": prompt, "role": role}] + convo
 
 
+# %%
 results_frame_ft1 = pd.concat([
     make_results_frame(
         final_chat_df,
@@ -642,7 +650,6 @@ results_frame_ft1 = pd.concat([
         model="gpt-3.5-turbo-1106",
     ),
 ])
-# %%
 results_framec_pt1 = make_results_frame(
     final_chat_dfc,
     ord_vals=[8, 192, None],
@@ -801,8 +808,8 @@ def fill_out_results(df_frame, n_loops=1):
 # print("Results with completion", results_df3.groupby("new_model")["new_completion"].count())
 
 
-results_df_ft1 = fill_out_results(results_frame_ft1)
-results_df_ft1.to_pickle(f"data_dump/oai_mod/results_finetune1_{git_hash()}.pkl")
+# results_df_ft1 = fill_out_results(results_frame_ft1)
+# results_df_ft1.to_pickle(f"data_dump/oai_mod/results_finetune1_{git_hash()}.pkl")
 # %%
 # only for results_df are emptys are loaded as nans not ''
 results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
@@ -815,6 +822,41 @@ results_df2 = pd.read_pickle("data_dump/_bad_results2_01_25_34d63d4.pkl")
 results_df3 = pd.read_pickle("data_dump/results_df3_01_26_7486c8c.pkl")
 
 results_df_ft1 = pd.read_pickle("data_dump/oai_mod/results_finetune1_d370fdb.pkl")
+
+
+# %% Use finetune model's completion as a new last turn  and then see if other models will follow it
+def add_last_turn_from_comp(results_df, model):
+    base_ix = (
+        results_df["manipulation"].apply(lambda d: d["sep"] is None)
+        & (results_df["new_model"] == model)
+        & (results_df["new_completion"].apply(len) > 10)
+    )
+    results_df_ft1_for_comp = results_df[base_ix].copy()
+    assert results_df_ft1_for_comp.index.is_unique
+
+    results_df_ft1_for_comp["conversation"] = results_df_ft1_for_comp.apply(
+        lambda row: row["sent_convo"] + [{"role": "assistant", "content": row["new_completion"]}],
+        axis=1,
+    )
+    del results_df_ft1_for_comp["sent_convo"]
+    results_df_ft1_for_comp["new_oai_mod"] = None
+    results_df_ft1_for_comp["new_completion"] = None
+    return results_df_ft1_for_comp
+
+
+frame_ft1_from_comp = add_last_turn_from_comp(
+    results_df_ft1, model="ft:gpt-3.5-turbo-1106:personal::8rihflOA"
+)
+assert set(frame_ft1_from_comp.index) <= set(final_chat_df_ft.index)
+results_df_ft1_from_comp = pd.concat([
+    make_results_frame(frame_ft1_from_comp, ord_vals=[None], model="gpt-4-0613"),
+    make_results_frame(frame_ft1_from_comp, ord_vals=[None], model="gpt-4-1106-preview"),
+    make_results_frame(frame_ft1_from_comp, ord_vals=[None], model="gpt-4-0125-preview"),
+])
+results_df_ft1_from_comp = fill_out_results(results_df_ft1_from_comp)
+results_df_ft1_from_comp.to_pickle(
+    f"data_dump/oai_mod/results_finetune1_from_comp_{git_hash()}.pkl"
+)
 
 
 # %% # analysis pre-processing
@@ -847,13 +889,16 @@ def explode_moderation_results(df, prefix):
     return exploded_mod.set_index(exploded_mod.index)
 
 
-def make_analysis_df(results_df, final_chat_df):
+def make_analysis_df(results_df, final_chat_df, models_from_mod_only=True):
     some_mod = results_df["manipulation"].apply(
         lambda d: d["sep"] is not None or d["kind"] is not None
     )
 
     # Apply to different models/scenarios
-    models = results_df[~some_mod]["new_model"]
+    if models_from_mod_only:
+        models = results_df[~some_mod]["new_model"]
+    else:
+        models = results_df["new_model"]
     _exploded_no_mod = []
     for m_name in models.unique():
         df = results_df[~some_mod][models == m_name]
@@ -887,6 +932,30 @@ def make_analysis_df(results_df, final_chat_df):
     return analysis_df
 
 
+def make_analysis_df_from_comp(results_from_comp, final_chat_df_ft):
+    assert final_chat_df_ft.index.is_unique
+    _final_chat_df_ft_from_comp = final_chat_df_ft[
+        final_chat_df_ft.index.isin(results_from_comp.index)
+    ]
+    _exploded_no_mod = []
+    _models = results_from_comp["new_model"]
+    for m_name in _models.unique():
+        df = results_from_comp[_models == m_name]
+        assert df.index.is_unique
+        e = explode_moderation_results(df, m_name.replace("-", ""))
+        _exploded_no_mod += [e]
+    analysis_from_comp = pd.concat(
+        [
+            _final_chat_df_ft_from_comp[["conversation_id", "turn", "language", "model"]],
+            *_exploded_no_mod,
+        ],
+        axis=1,
+    )
+    assert analysis_from_comp.index.is_unique
+    analysis_from_comp["mod_how_str"] = "none"
+    return analysis_from_comp
+
+
 # analysis_df = make_analysis_df(results_df[~results_df["new_oai_mod"].isna()], final_chat_df)
 # analysis_df.to_pickle(f"data_dump/analysis_df_01_30_{git_hash()}.pkl")
 
@@ -904,8 +973,13 @@ def make_analysis_df(results_df, final_chat_df):
 
 # analysis should concat both 1 and 3?
 
-analysis_df_ft1 = make_analysis_df(results_df_ft1, final_chat_df)
-analysis_df_ft1.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
+# analysis_df_ft1 = make_analysis_df(results_df_ft1, final_chat_df_ft)
+# analysis_df_ft1.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
+
+# some convo's in final_chat_df_ft weren't sent
+analysis_df_ft1_from_comp = make_analysis_df_from_comp(results_df_ft1_from_comp, final_chat_df_ft)
+analysis_df_ft1_from_comp.to_pickle(f"data_dump/oai_mod/analysis_df_ft1_{git_hash()}.pkl")
+analysis_df_ft1_from_comp
 # %%
 final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
 final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
@@ -934,6 +1008,7 @@ analysis_all = pd.concat([
 ])
 
 analysis_df_ft1 = pd.read_pickle("data_dump/oai_mod/analysis_df_ft1_d370fdb.pkl")
+analysis_df_ft1_from_comp = pd.read_pickle("data_dump/oai_mod/analysis_df_ft1_d5f3f5a.pkl")
 # %%
 # Summary Analysis
 prefix2model = {
@@ -941,6 +1016,7 @@ prefix2model = {
     "gpt41106preview": "gpt-4-1106-preview",
     "gpt40125preview": "gpt-4-0125-preview",
     "ft:gpt3.5turbo1106:personal::8rihflOA": "ft:gpt-3.5-turbo-1106:personal::8rihflOA",
+    "gpt3.5turbo1106": "gpt-3.5-turbo-1106",
 }
 
 
@@ -1046,19 +1122,59 @@ def print_summaries(df):
     plt.show()
 
 
+def print_summaries_no_mod(df):
+    """ "
+    Where no manipulation happened, but returned multiple models
+    TODO: this should be seperated out within a mod_how_str
+    """
+    prefixes = [c.replace("_oai_mod", "") for c in df.columns if "_oai_mod" in c and c[:3] != "new"]
+    print(
+        "Num Completions ",
+        [(c, df[f"{c}_completion"].size) for c in prefixes],
+    )
+
+    for col_prefix in np.unique(prefixes):
+        model = prefix2model[col_prefix]
+        print("\n#####")
+        print(
+            f"Average max score with no manipulation {model}\n",
+            df[f"{col_prefix}_max_scores"].agg(["mean", "sem"]),
+        )
+        print(
+            f"If flagged with no manipulation {model}\n",
+            df[f"{col_prefix}_any_flagged"].agg(["mean", "sem"]),
+        )
+
+    for c1, c2 in combinations(prefixes, 2):
+        print(f"\n\n#######     {prefix2model[c1]} vs {prefix2model[c2]}")
+        more_trues(df[f"{c1}_any_flagged"], df[f"{c2}_any_flagged"])
+        avg_larger(df[f"{c1}_max_scores"], df[f"{c2}_max_scores"])
+
+
+# # No manipulations actually get worse responses then manipulations
 # print_summaries(analysis_df_ft1)
-no_dup_convos_ft1 = analysis_df_ft1[
-    ~analysis_df_ft1["conversation_id"].isin(made_convo_df4["conversation_id"])
-]
-# print_summaries(no_dup_convos_ft1) # finetuned on 7/250 of the same
-more_trues(
-    no_dup_convos_ft1["ft:gpt3.5turbo1106:personal::8rihflOA_any_flagged"],
-    no_dup_convos_ft1[f"gpt3.5turbo1106_any_flagged"],
-)
-avg_larger(
-    no_dup_convos_ft1["ft:gpt3.5turbo1106:personal::8rihflOA_max_scores"],
-    no_dup_convos_ft1[f"gpt3.5turbo1106_max_scores"],
-)
+# more_trues(
+#     analysis_df_ft1["ft:gpt3.5turbo1106:personal::8rihflOA_any_flagged"],
+#     analysis_df_ft1[f"gpt3.5turbo1106_any_flagged"],
+# )
+# avg_larger(
+#     analysis_df_ft1["ft:gpt3.5turbo1106:personal::8rihflOA_max_scores"],
+#     analysis_df_ft1[f"gpt3.5turbo1106_max_scores"],
+# )
+
+
+# # No benifit from having 1 finetune re-write, but can find a couple gpt-4-0125 trips on
+print_summaries_no_mod(analysis_df_ft1_from_comp)
+_analysis_df_from_comp = analysis_df[analysis_df.index.isin(analysis_df_ft1_from_comp.index)]
+print("$" * 10)
+for c in ["gpt40613", "gpt41106preview"]:
+    print(f"\n%%%%%%   Same Model with and without 1 turn re-written prefix {prefix2model[c]}")
+    more_trues(
+        analysis_df_ft1_from_comp[f"{c}_any_flagged"], _analysis_df_from_comp[f"{c}_any_flagged"]
+    )
+    avg_larger(
+        analysis_df_ft1_from_comp[f"{c}_max_scores"], _analysis_df_from_comp[f"{c}_max_scores"]
+    )
 
 # print_summaries(analysis_dfc)
 # print_summaries(analysis_dfb)
@@ -1151,7 +1267,7 @@ def _map_to_chunk(r):
 
 def fix_new_results_ix(r):
     """
-    from index [0000,1111,..etc] like analysis
+    from index [0,0,0,0,1,1,1,1,..etc] like analysis from .pkl
     to [0,1,2,...0,1,2...] like results
     """
     results_df_chunks = r.apply(_map_to_chunk, axis=1)
