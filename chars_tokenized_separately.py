@@ -622,30 +622,7 @@ final_chat_df_cos_dist.to_pickle(f"data_dump/oai_mod/chat_df_from_cos_dist_{git_
 final_chat_df_cos_dist_english.to_pickle(
     f"data_dump/oai_mod/chat_df_from_cos_dist_english_{git_hash()}.pkl"
 )
-# %%
-# TODO Delete
-max_tokens = (128000 - 1000) // 2  # sending to gpt-4-0125
-for df, rdf in [
-    (final_chat_df_cos_dist, results_df_cos_dist),
-    (final_chat_df_cos_dist_english, results_df_cos_dist_english),
-]:
-    d = df["conversation"]
-    shorter_convo = d.apply(
-        lambda c: end_of_convo(c, max_tokens=max_tokens, strip_first_assistant=False)
-    )
-    ix = rdf["new_oai_mod"].isna().iloc[:250]
-    assert len(df["conversation"].astype(str).compare(shorter_convo.astype(str))) == ix.sum()
-    assert (
-        len(df["conversation"][ix].astype(str).compare(shorter_convo[ix].astype(str))) == ix.sum()
-    )
-    df["conversation"] = shorter_convo
 
-# # remove what finetuned on
-# _made_convo_df4 = pd.read_pickle("data_dump/oai_mod/finetune/chat_df4_ft1.pkl_9d0d425.pkl")
-# final_chat_df_ft = final_chat_df[
-#     ~final_chat_df["conversation_id"].isin(_made_convo_df4["conversation_id"])
-# ].copy()
-# final_chat_df_ft.to_pickle("data_dump/oai_mod/final_chat_df_d370fdb.pkl")
 # %%
 final_chat_df_summaries(final_chat_df, chat_df)
 final_chat_df_summaries(final_chat_dfb, chat_dfb)
@@ -662,7 +639,7 @@ final_chat_df3.to_pickle(f"data_dump/final_chat_df3_{git_hash()}.pkl")
 # Finished preprocessing
 final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
 final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
-final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_d45647f.pkl")
+final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_f1978a7.pkl")
 final_chat_df2 = pd.read_pickle("data_dump/final_chat_df2_d6767b3.pkl")
 final_chat_df3 = pd.read_pickle("data_dump/final_chat_df3_d6767b3.pkl")
 
@@ -932,21 +909,13 @@ def fill_out_results(df_frame, n_loops=1):
 # results_df_ft2 = fill_out_results(results_df_ft2)  # english only model
 # results_df_ft2.to_pickle(f"data_dump/oai_mod/results_finetune2_{git_hash()}.pkl")
 
-# base is high cosine dist from max turn, Expect a high default flag rate
-results_df_cos_dist = fill_out_results(results_frame_cos_dist)
-results_df_cos_dist.to_pickle(f"data_dump/oai_mod/results_cos_dist_{git_hash()}.pkl")
-results_df_cos_dist_english = fill_out_results(results_frame_cos_dist_english)  # english only model
-results_df_cos_dist_english.to_pickle(
-    f"data_dump/oai_mod/results_cos_dist_english_{git_hash()}.pkl"
-)
-# %%
-results_df_cos_dist["sent_convo"] = results_frame_cos_dist["sent_convo"]
-results_df_cos_dist_english["sent_convo"] = results_frame_cos_dist_english["sent_convo"]
-results_df_cos_dist = fill_out_results(results_df_cos_dist)
+# # base is high cosine dist from max turn, Expect a high default flag rate
+# results_df_cos_dist = fill_out_results(results_frame_cos_dist)
 # results_df_cos_dist.to_pickle(f"data_dump/oai_mod/results_cos_dist_{git_hash()}.pkl")
-results_df_cos_dist_english = fill_out_results(results_df_cos_dist_english)  # english only model
-print(results_df_cos_dist.isna().sum())
-print(results_df_cos_dist_english.isna().sum())
+# results_df_cos_dist_english = fill_out_results(results_frame_cos_dist_english)  # english only model
+# results_df_cos_dist_english.to_pickle(
+#     f"data_dump/oai_mod/results_cos_dist_english_{git_hash()}.pkl"
+# )
 # %%
 # only for results_df are emptys are loaded as nans not ''
 results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
@@ -2062,13 +2031,27 @@ def last_prompt_lengths_vs_max_score(analysis_df):
 # last_prompt_lengths_vs_max_score(analysis_df)
 # last_prompt_lengths_vs_max_score(analysis_dfb)
 # last_prompt_lengths_vs_max_score(analysis_df3)
-# df = pd.concat([analysis_df_cos_dist, analysis_df_cos_dist_english])
-# reg_plot(
-#     df["turn_max_new_default_cos_dist_small"],
-#     df["gpt40125preview_max_scores"],
-#     "turn_max_cos_dist",
-#     "any_flagged",
-# )
+df = pd.concat([analysis_df_cos_dist, analysis_df_cos_dist_english])
+print(
+    df.groupby("language")["gpt40125preview_any_flagged"]
+    .agg(["count", "sum", "mean", "sem"])
+    .rename(
+        columns={
+            "count": "total",
+            "sum": "total_flagged",
+            "mean": "frac_flagged",
+            "sem": "sem_frac_flagged",
+        }
+    )
+    .query("total_flagged> 0")
+    .sort_values(by="total_flagged")
+)
+reg_plot(
+    df["turn_max_new_default_cos_dist_small"],
+    df["gpt40125preview_any_flagged"],
+    "turn_max_cos_dist",
+    "plain text any_flagged",
+)
 
 
 def score_vs_length_by_manipulation(analysis_df, m="gpt40613"):
@@ -2323,6 +2306,43 @@ with open(f"data_dump/not_flagged_rows_{git_hash()}.txt", "w") as f:
             # com = pprint.pformat(r["new_completion"])
             # chunk += f"\n$$$ {r['mod_how_str']}\n{scores}\n{com}"
         f.write(chunk)
+# %%
+# Print results to json for review
+df = pd.concat([results_df_cos_dist, results_df_cos_dist_english])
+df = df[df["manipulation"].apply(lambda d: d["sep"] is None)]
+df["completion_flagged"] = df["new_oai_mod"].apply(chat_is_flagged)
+write = df.query("completion_flagged ==True")[[
+    "new_model",
+    "manipulation",
+    "sent_convo",
+    "new_completion",
+    "completion_flagged",
+    "new_oai_mod",
+]]
+write.to_json(
+    "data_dump/high_cos_dist_tricked_gpt4_0125_preview.json",
+    orient="records",
+    lines=True,
+    indent=4,
+    force_ascii=False,
+)
+#%%
+write2 = write.copy()
+write2["sent_convo"] = write2["sent_convo"].apply(make_user_last_speaker)
+write2["new_oai_mod"] = None
+write2["new_completion"] = None
+write2 = fill_out_results(write2)
+write2["completion_flagged"] = write2["new_oai_mod"].apply(chat_is_flagged)
+write = pd.concat([write, write2])
+write.to_json(
+    "data_dump/high_cos_dist_tricked_gpt4_0125_preview.json",
+    orient="records",
+    lines=True,
+    indent=4,
+    force_ascii=False,
+)
+
+
 # %%
 # For testing Chat Apps, which inital messages don't get flagged?
 # check = analysis_df[analysis_df["new_sexual"] > 0.9].sort_values("new_sexual", ascending=False)
