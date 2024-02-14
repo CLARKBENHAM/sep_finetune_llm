@@ -1050,13 +1050,14 @@ def make_df_requests(df, input_col, model, result_col=None):
     return df[result_col].where(ix_already_have, out_data).copy()
 
 
-def get_largest_cosine(file1, file2, df, per_keep, out_col_name):
+def get_largest_cosine(file1, file2, df, per_keep, out_col_name, keep_iloc=None):
     """
     From 2 jsonl files, each with lines of [[{"model": "", "input":""}, {"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [999]}],"model": "text-embedding-3-small", "usage": {"prompt_tokens": 803, "total_tokens": 803}}, {"loc": 1514, "iloc": 0}]]
     calculate the cosine distance between the embeddings where each iloc lines up.
     The iloc are mostly, but not perfectly sorted by iloc
     The jsonl files are too large to be loaded into memory directly
-    return the top per_keep percent of ilocs on the df with the highest cosine distance between the two files.
+    return the top per_keep percent of all total ilocs on the df with the highest cosine distance between the two files.
+        keep_iloc filters rows to keep.
     """
     f1_ilocs = {}
     f2_ilocs = {}
@@ -1068,6 +1069,8 @@ def get_largest_cosine(file1, file2, df, per_keep, out_col_name):
         keeps the biggest values seen.
         It's a min heap so smallest values are popped off root after length
         """
+        if iloc is None:
+            return
         assert dist >= 0
         if len(pq) < top_n_ilocs:
             heapq.heappush(pq, (dist, iloc))
@@ -1075,6 +1078,8 @@ def get_largest_cosine(file1, file2, df, per_keep, out_col_name):
             heapq.heappushpop(pq, (dist, iloc))
 
     def process_ilocs(ilocs_dict, iloc, emb, other_dict, _add):
+        if iloc is None:
+            return
         if iloc in other_dict:
             cos_dist = cosine(emb, other_dict[iloc])
             _add(cos_dist, iloc)
@@ -1093,13 +1098,17 @@ def get_largest_cosine(file1, file2, df, per_keep, out_col_name):
             emb2 = np.array(data2[1]["data"][0]["embedding"])
             iloc1 = data1[2]["iloc"]
             iloc2 = data2[2]["iloc"]
+            if not keep_iloc(iloc1):
+                iloc1 = None
+            if not keep_iloc(iloc2):
+                iloc2 = None
             if iloc1 == iloc2:
                 cos_dist = cosine(emb1, emb2)
                 _add(cos_dist, iloc1)
             else:
                 process_ilocs(f1_ilocs, iloc1, emb1, f2_ilocs, _add)
                 process_ilocs(f2_ilocs, iloc2, emb2, f1_ilocs, _add)
-            if ix % (len(df) // 10) == 0:
+            if ix % (len(df) // 10) == 0 and ix > 0:
                 print(
                     f"{datetime.now()} {ix}/{len(df)} has"
                     f" {ix + 1 -(len(f1_ilocs) + len(f2_ilocs))/2} matched; but {len(f1_ilocs)} f1"
@@ -1148,6 +1157,17 @@ else:
     # make_batch_requests(
     #     preembed_df4, "default_sent_convo", "text-embedding-3-small"
     # )
+    # big_dist_df4 = get_largest_cosine(
+    #     # new_sent_convo small missing 3 rows
+    #     "data_dump/oai_mod/temp_throughput/req_embedding_02_12_18_11_09_968134_result_not_quite_finished.jsonl",
+    #     # default_sent_convo small
+    #     "data_dump/oai_mod/temp_throughput/req_embedding_02_12_21_11_30_511517_result_not_quite_finished.jsonl",
+    #     preembed_df4,
+    #     PER_KEEP,
+    #     "new_default_cos_dist_small",
+    # )
+    # matched all but 3
+    # big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_filtered_cos_{git_hash()}.pkl")
     big_dist_df4 = get_largest_cosine(
         # new_sent_convo small missing 3 rows
         "data_dump/oai_mod/temp_throughput/req_embedding_02_12_18_11_09_968134_result_not_quite_finished.jsonl",
@@ -1156,18 +1176,20 @@ else:
         preembed_df4,
         PER_KEEP,
         "new_default_cos_dist_small",
+        keep_iloc=lambda iloc: preembed_df4.iloc[iloc]["language"] == "English",
     )
-    # matched all but 3
-    big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_filtered_cos_{git_hash()}.pkl")
-
+    big_dist_df4.to_pickle(
+        f"data_dump/oai_mod/big_bad_finetune_filtered_cos_english_only_{git_hash()}.pkl"
+    )
 big_dist_df4["new_oai_mod"] = make_df_requests(
     big_dist_df4, "new_sent_convo", "text-moderation-latest"
 )
+#%%
 big_dist_df4["new_max_score"] = big_dist_df4["new_oai_mod"].apply(chat_max_scores)
 big_dist_df4["new_any_flagged"] = big_dist_df4["new_oai_mod"].apply(chat_is_flagged)
 big_dist_df4["og_max_score"] = big_dist_df4["og_openai_moderation"].apply(chat_max_scores)
 big_dist_df4["og_any_flagged"] = big_dist_df4["og_openai_moderation"].apply(chat_is_flagged)
-big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_w_mod_{git_hash()}.pkl")
+big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_w_mod_english_only_{git_hash()}.pkl")
 
 df4 = big_dist_df4.rename(
     columns={"og_any_flagged": "default_any_flagged", "og_max_score": "default_max_score"}
@@ -1178,7 +1200,7 @@ print_3d_table_by_cols_name_fn(
     cutoffs=[1, 0.5, 0.25, 0.1, 0.05, 0.01],
     model_cols=(("text-embedding-3-small", "new_default_cos_dist_small"),),
 )
-# %%
+
 # # format: {"messages": [{"role": "system", "content": "Marv is a factual chatbot that is also sarcastic."}, {"role": "user", "content": "What's the capital of France?"}, {"role": "assistant", "content": "Paris, as if everyone doesn't know that already."}]}
 # each turn has 4k, limit should already be short enough
 from src.make_prompts import make_prompt13
@@ -1249,6 +1271,26 @@ def make_finetune_convos1(df, convo_ids=None):
     return df_grouped
 
 
+def make_finetune_convos_summary(df, convo_ids=None):
+    """
+    Train model to create a summary
+    """
+    if convo_ids is None:
+        convo_ids = df.query("default_any_flagged ==True and new_any_flagged ==False")[
+            "conversation_id"
+        ].unique()
+    df_grouped = (
+        df[df["conversation_id"].isin(convo_ids)]
+        .groupby("conversation_id")
+        .apply(filter_and_join)
+        .reset_index()
+        .rename(columns={0: "finetune_convo"})
+        .query("finetune_convo!=False")
+        .reset_index()
+    )
+    return df_grouped
+
+
 def start_finetune(send_df, fname):
     """Convert a df into a json file and start a finetune training"""
     assert len(send_df) > 10, "min finetune len is 10 convos"
@@ -1272,14 +1314,6 @@ def start_finetune(send_df, fname):
     )
 
 
-# n = round(len(merged_df3) * 0.5)
-# df3 = merged_df3.nlargest(n, "new_default_cos_dist")
-# start_finetune(df3, "chat_df3_test.json")
-# # ft:gpt-3.5-turbo-1106:personal::8q9ZY1NX
-# # Succesfully trained
-# # First Proof you can finetune where was flagged but now isn't
-
-
 # data all made
 # use original old oai endpoint for filtering
 print(
@@ -1299,7 +1333,7 @@ print(
     .apply(lambda d: num_tokens_from_messages(d["messages"]))
     .describe(),
 )
-start_finetune(made_convo_df4, "chat_df4_ft1.json")
+start_finetune(made_convo_df4, "chat_df4_ft1_english_only")
 
 
 # %%
