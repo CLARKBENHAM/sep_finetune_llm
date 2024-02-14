@@ -1699,7 +1699,7 @@ def show_reg_plot_cos_dist_by_group_avg(
     df = (
         merged_df.groupby(["language", "mod_how_str"])[[x_name, y_name]]
         .mean()
-        .sort_values("new_default_cos_dist")
+        .sort_values(x_name)
     )
     df.reset_index(inplace=True)
     plt.figure(figsize=(10, 8))
@@ -1708,8 +1708,8 @@ def show_reg_plot_cos_dist_by_group_avg(
     # Add labels
     for i in range(df.shape[0]):
         plt.text(
-            df.loc[i, "new_default_cos_dist"],
-            df.loc[i, "new_minus_default_max_score"],
+            df.loc[i,x_name],
+            df.loc[i, y_name],
             f"{df.loc[i, 'language']}-{df.loc[i, 'mod_how_str']}",
             horizontalalignment="left",
             size="medium" if len(df) < 20 else "small",
