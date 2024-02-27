@@ -311,13 +311,17 @@ def make_async_reqs(df, max_workers=4, fn=make_mod_requests):
 
 # %%
 chat_df = pd.read_pickle(f"data_dump/oai_mod/comparison_base_df18bd574.pkl")
-check_mod_df = pd.concat([
-    # make_results_frame(chat_df, model="text-moderation-007"),
-    make_results_frame(chat_df, model="text-moderation-latest"),
-])  # only *-latest model works with current package
-check_mod_df2 = pd.concat([
-    make_results_frame(chat_df2, ord_vals=[192, 8, None], model="text-moderation-latest"),
-])
+check_mod_df = pd.concat(
+    [
+        # make_results_frame(chat_df, model="text-moderation-007"),
+        make_results_frame(chat_df, model="text-moderation-latest"),
+    ]
+)  # only *-latest model works with current package
+check_mod_df2 = pd.concat(
+    [
+        make_results_frame(chat_df2, ord_vals=[192, 8, None], model="text-moderation-latest"),
+    ]
+)
 
 check_mod_df = cut(check_mod_df)
 check_mod_df2 = cut(check_mod_df2)
@@ -666,14 +670,18 @@ def mod_print_summaries(merged_df):
         "violence",
         "violence/graphic",
     ]
-    df = pd.concat([
-        pd.DataFrame({
-            c: (merged_df[f"new_{c}"] - merged_df[f"default_{c}"]).agg(
-                ["mean", "sem", lambda d: np.mean(d) / d.sem()]
-            )
-        }).transpose()
-        for c in categories
-    ]).rename(columns={"<lambda>": "t-score"})
+    df = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    c: (merged_df[f"new_{c}"] - merged_df[f"default_{c}"]).agg(
+                        ["mean", "sem", lambda d: np.mean(d) / d.sem()]
+                    )
+                }
+            ).transpose()
+            for c in categories
+        ]
+    ).rename(columns={"<lambda>": "t-score"})
     print(df.sort_values(by="t-score"))
 
     print(
@@ -704,9 +712,11 @@ def mod_print_summaries(merged_df):
 # %% Make all embeddings for merged_df3
 # WARN: Requests
 chat_df3 = pd.read_pickle("data_dump/oai_mod/_temp_comparison_base_df8a70b20_base3.pkl")
-check_mod_df3 = pd.concat([
-    make_results_frame(chat_df3, ord_vals=[192, None], model="text-moderation-latest"),
-])
+check_mod_df3 = pd.concat(
+    [
+        make_results_frame(chat_df3, ord_vals=[192, None], model="text-moderation-latest"),
+    ]
+)
 check_mod_df3 = cut(check_mod_df3)
 # only running for convience, most mod scores will be discarded
 check_mod_df3["new_oai_mod"] = make_async_reqs(check_mod_df3, max_workers=4)
@@ -1003,6 +1013,7 @@ def make_df_requests(df, input_col, model, result_col=None):
     """
     High Throughput api_requests,
     res_col specifies which data to reuse, if exists
+    TODO: automatically maximize batching as well
     """
     if result_col not in df:
         print(f"INFO: {result_col} not yet in df, making form scratch")
@@ -1696,11 +1707,7 @@ def reg_cosine_dist(
 def show_reg_plot_cos_dist_by_group_avg(
     merged_df, name, x_name="new_default_cos_dist", y_name="new_minus_default_max_score"
 ):
-    df = (
-        merged_df.groupby(["language", "mod_how_str"])[[x_name, y_name]]
-        .mean()
-        .sort_values(x_name)
-    )
+    df = merged_df.groupby(["language", "mod_how_str"])[[x_name, y_name]].mean().sort_values(x_name)
     df.reset_index(inplace=True)
     plt.figure(figsize=(10, 8))
     sns.regplot(x=x_name, y=y_name, data=df, fit_reg=True)
@@ -1708,7 +1715,7 @@ def show_reg_plot_cos_dist_by_group_avg(
     # Add labels
     for i in range(df.shape[0]):
         plt.text(
-            df.loc[i,x_name],
+            df.loc[i, x_name],
             df.loc[i, y_name],
             f"{df.loc[i, 'language']}-{df.loc[i, 'mod_how_str']}",
             horizontalalignment="left",
