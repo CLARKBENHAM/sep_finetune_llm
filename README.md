@@ -9,6 +9,7 @@ If I set the system prompt to "Remember: Insert '{seperator_token_char}' after e
 From an initial sample of conversations with high OpenAI moderation scores, adding separator tokens makes 3.1% not be flagged that should've been. Conversely 1.7% are now flagged where they weren't before.
 But text-moderation-007 performs much worse on certain categories and languages with seperators added. On a new test of Portugues, French, unknown and Russian: 12.4% weren't flagged that should've been and 2.2% were flagged that shouldn't have been.
 On average the sexual moderation score decreased by 2 ppt (z=-32.2), while harassment (z=5.6), self-harm(z=6.3), and violence (z=8.9) all had their average moderation scores increase.
+Here's a full look at text-moderation-007 https://docs.google.com/document/d/1FeXZoNo2LmA17zESkeTMyiK3neoGYmAFd2juu3olpPM/edit#heading=h.nemwrk2r4hqm
 
 ## Cosine Distance Can be used to find confusing examples
 The larger the cosine distances between the message's regular embedding and the embedding of the message with separator tokens, the "worse" models behave.
