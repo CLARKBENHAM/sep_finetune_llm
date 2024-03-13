@@ -31,36 +31,6 @@ async def get_tokens(client, to_tokenize: str) -> None:
     return tokens, total_tokens_usage
 
 
-async def get_tokens2(client, to_tokenize: str) -> None:
-    tokens = []
-    stream = client.messages.stream(
-        max_tokens=1000,
-        system=(
-            "Copy the text between <tocopy> markers. Include trailing spaces or breaklines. Do not"
-            " write anything else. One example \nInput: <tocopy>Example sentence.</tocopy>\nOutput:"
-            " Example sentence."
-        ),
-        messages=[
-            {
-                "role": "user",
-                "content": f"<tocopy>{to_tokenize}</tocopy>",
-            }
-        ],
-        model="claude-3-opus-20240229",
-    )
-
-    try:
-        async for event in stream:
-            if event.type == "content_block_delta":
-                tokens.append(event.delta.text)
-            if event.type == "message_delta":
-                total_tokens_usage = event.usage.output_tokens
-    finally:
-        await stream.aclose()  # Close the stream when done
-
-    return tokens, total_tokens_usage
-
-
 def tokenize_text(client, to_tokenize: str) -> None:
     tokens, total_tokens_usage = asyncio.run(get_tokens(client, to_tokenize))
     return tokens, total_tokens_usage
