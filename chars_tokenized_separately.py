@@ -886,6 +886,7 @@ results_df_ft2_from_comp = pd.read_pickle(
     "data_dump/oai_mod/results_finetune2_from_comp_e9f5494.pkl"
 )
 
+
 # %% Use finetune model's completion as a new last turn  and then see if other models will follow it
 def add_last_turn_from_comp(results_df, model):
     """Only returns row where new completion len > 10"""

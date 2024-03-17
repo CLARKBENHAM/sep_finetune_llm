@@ -13,8 +13,19 @@ from openai import OpenAI
 from copy import deepcopy
 from itertools import accumulate
 
-openai_api_key = os.environ["OPENAI_API_KEY"]
+import nest_asyncio
 
+nest_asyncio.apply()
+
+from anthropic import Anthropic, AsyncAnthropic
+
+from src.anthropic_tokenizer import AnthropicEncoding
+
+an_client_async = AsyncAnthropic()
+an_client_sync = Anthropic()
+
+
+openai_api_key = os.environ["OPENAI_API_KEY"]
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
@@ -32,6 +43,7 @@ SEP = "@"
 
 encoding = tiktoken.encoding_for_model("gpt-4")  # gpt-3.5 to 4 use same encoder: 100k
 # tiktoken.encoding_name_for_model("gpt-4") == tiktoken.encoding_name_for_model("gpt-3.5-turbo-instruct")
+anthropic_encoding = AnthropicEncoding(an_client_async)
 
 
 def get_mod(s, openai_api_key=openai_api_key):
@@ -174,10 +186,12 @@ def get_completion(model, s, sep=SEP, client=client):
     s = text_w_sep(s)
     response = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": f"Continue this story with {sep}:```{s}```",
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": f"Continue this story with {sep}:```{s}```",
+            }
+        ],
     )
     # print(response)
     out = response.choices[0].message.content.replace(sep, "")
@@ -186,10 +200,12 @@ def get_completion(model, s, sep=SEP, client=client):
 
 def get_chat_completion(model, s, sep, client=client, **kwargs):
     if isinstance(s, str):
-        messages = [{
-            "role": "user",
-            "content": s,  # f"Continue this story with {sep}:```{s}```", # also makes words 'worse'
-        }]
+        messages = [
+            {
+                "role": "user",
+                "content": s,  # f"Continue this story with {sep}:```{s}```", # also makes words 'worse'
+            }
+        ]
     else:
         messages = s
     response = client.chat.completions.create(
@@ -215,3 +231,6 @@ def chat_to_str(conv):
 
 def git_hash():
     return os.popen("git rev-parse --short HEAD").read().strip()
+
+
+# %%

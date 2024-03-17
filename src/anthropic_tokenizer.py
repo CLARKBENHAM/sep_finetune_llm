@@ -36,6 +36,19 @@ def tokenize_text(client, to_tokenize: str) -> None:
     return tokens, total_tokens_usage
 
 
+class AnthropicEncoding:
+    def __init__(self, client):
+        self.client = client
+
+    def encode(self, s):
+        """Returns string chunks, not number of tokens"""
+        s_chunks, ntokens = tokenize_text(self.client, s)
+        return s_chunks
+
+    def decode(self, s_chunks):
+        return "".join(s_chunks)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--text", help="The text to tokenize", required=False, default=None)
