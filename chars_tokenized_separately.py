@@ -574,7 +574,7 @@ final_chat_df_ft = final_chat_df[
 final_chat_df_ft.to_pickle(f"data_dump/oai_mod/final_chat_df_{git_hash()}.pkl")
 
 # %%
-# Finished preprocessing
+################################# Finished preprocessing
 final_chat_df = pd.read_pickle("data_dump/final_chat_df_d6767b3.pkl")
 final_chat_dfb = pd.read_pickle("data_dump/final_chat_dfb_2e513e8.pkl")
 final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_f1978a7.pkl")
@@ -591,7 +591,7 @@ final_chat_df_cos_dist_english = pd.read_pickle(
 
 
 # %%
-# rows to make
+# Utils to setup result frames
 def make_results_frame(
     final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="gpt-4-0613", make_new_convo=None
 ):
@@ -636,6 +636,8 @@ def prepend_prompt(prompt_fn, sep, convo, role="system"):
     return [{"content": prompt, "role": role}] + convo
 
 
+# %% #### Fill out the result frames for OpenAI
+
 results_frame_cos_dist = make_results_frame(
     final_chat_df_cos_dist,
     ord_vals=[192, None],
@@ -658,7 +660,7 @@ results_frame_cos_dist_english = make_results_frame(
         role="system",
     ),
 )
-# %%
+
 results_frame_ft1 = pd.concat(
     [
         make_results_frame(
@@ -700,11 +702,13 @@ results_framec_pt2 = make_results_frame(
         role="system",
     ),
 )
-results_framec = pd.concat([results_framec_pt1, results_framec_pt2])
+results_framec = pd.concat(
+    [results_framec_pt1, results_framec_pt2]
+)  # TODO: test framec with system prompts
 
 results_frame = _mrf(final_chat_df)
 results_frameb = make_results_frame(final_chat_dfb, ord_vals=[8, 192, None])
-results_framec = make_results_frame(final_chat_dfc, ord_vals=[8, 192, None])
+# results_framec = make_results_frame(final_chat_dfc, ord_vals=[8, 192, None]) #not used for results_dfc_02_02_f1978a7.pkl
 results_frame2 = _mrf(final_chat_df2)
 results_frame3 = _mrf(final_chat_df3)
 
@@ -716,6 +720,32 @@ results_frame2["sent_convo"] = results_frame2["sent_convo"].apply(
         else end_of_convo(convo, max_tokens=8192 - 500)
     )
 )
+# %%
+import os
+import pandas as pd
+
+
+def search_pickles(directory, search_string):
+    for filename in os.listdir(directory):
+        if "result" in filename and filename.endswith(".pkl"):
+            df = pd.read_pickle(os.path.join(directory, filename))
+            if (
+                "sent_convo" in df
+                and df["sent_convo"].apply(lambda r: search_string in str(r)).any()
+            ):
+                print(f"String found in file {filename}, column sent_convo")
+                break
+            else:
+                print("Not", filename)
+
+
+search_pickles("data_dump", "essential for identifying your responses")
+search_pickles("data_dump/oai_mod", "It's essential for identifying your responses.")
+# %%
+#### Fill out the result frames for Anthropic
+an_results_frame = results_frame.copy(deep=True)
+an_results_framec = results_framec.copy(deep=True)
+an_results_frame.head()
 
 
 # %%
@@ -767,7 +797,7 @@ def get_chat_completion(model, s, sep=None, client=client, **kwargs):
     return None, None
 
 
-def fill_out_results(df_frame, n_loops=1):
+def fill_out_results(df_frame, n_loops=1, client=client):
     with ThreadPoolExecutor(max_workers=15) as executor:
         results_df = copy.deepcopy(df_frame)
         missing_ix = results_df["new_oai_mod"].isna()
@@ -776,7 +806,9 @@ def fill_out_results(df_frame, n_loops=1):
             m_completion, m_oai_mod = list(
                 zip(
                     *executor.map(
-                        lambda mcsep: get_chat_completion(mcsep[0], mcsep[1], sep=mcsep[2]),
+                        lambda mcsep: get_chat_completion(
+                            mcsep[0], mcsep[1], sep=mcsep[2], client=client
+                        ),
                         zip(
                             results_df["new_model"][missing_ix],
                             results_df["sent_convo"][missing_ix],
@@ -858,7 +890,7 @@ def fill_out_results(df_frame, n_loops=1):
 # results_df_cos_dist_english.to_pickle(
 #     f"data_dump/oai_mod/results_cos_dist_english_{git_hash()}.pkl"
 # )
-# %%
+# %%  #### Read in past result summaries
 # only for results_df are emptys are loaded as nans not ''
 results_df = pd.read_pickle("data_dump/results_df_01_24_b511c0f.pkl")
 
@@ -888,6 +920,7 @@ results_df_ft2_from_comp = pd.read_pickle(
 
 
 # %% Use finetune model's completion as a new last turn  and then see if other models will follow it
+# makes requests
 def add_last_turn_from_comp(results_df, model):
     """Only returns row where new completion len > 10"""
     base_ix = (
