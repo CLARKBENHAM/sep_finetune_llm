@@ -5,7 +5,9 @@ import asyncio
 import json
 
 
-async def get_tokens(client, to_tokenize: str) -> None:
+async def get_tokens(client, to_tokenize: str, model=None) -> None:
+    if model is None:
+        model = "claude-3-opus-20240229"
     tokens = []
     async with client.messages.stream(
         max_tokens=1000,
@@ -20,7 +22,7 @@ async def get_tokens(client, to_tokenize: str) -> None:
                 "content": f"<tocopy>{to_tokenize}</tocopy>",
             }
         ],
-        model="claude-3-opus-20240229",
+        model=model,
     ) as stream:
         async for event in stream:
             if event.type == "content_block_delta":
@@ -31,12 +33,14 @@ async def get_tokens(client, to_tokenize: str) -> None:
     return tokens, total_tokens_usage
 
 
-def tokenize_text(client, to_tokenize: str) -> None:
-    tokens, total_tokens_usage = asyncio.run(get_tokens(client, to_tokenize))
+def tokenize_text(client, to_tokenize: str, model=None) -> None:
+    tokens, total_tokens_usage = asyncio.run(get_tokens(client, to_tokenize, model=model))
     return tokens, total_tokens_usage
 
 
 class AnthropicEncoding:
+    """WARN: SLOW!! Makes Requests"""
+
     def __init__(self, client):
         self.client = client
 
