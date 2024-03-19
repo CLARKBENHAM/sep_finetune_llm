@@ -30,6 +30,7 @@ s3 = """Ↄ⊙◵⳺⸬⩋ⷒ⊨⃺ⴾ❭⬫⼀⠹⍓⩁⤋┝⢫⁴⨂☍⭬➖
 
 # words with random unicode
 s4 = "".join([c for i, j in zip_longest(s1.split(" "), list(s3), fillvalue="") for c in (i, j)])
+# S5: 'Ⓡ' vs  'ⓘ' vs '⊙' for opus,sonet,haiku; plus haiku change a lot of others
 s5 = "".join([c for i, j in zip_longest(s2.split(" "), list(s3), fillvalue="") for c in (i, j)])
 
 # random char words
@@ -48,7 +49,7 @@ s9 = "".join(random.choice(string.ascii_letters) for _ in range(100))
 
 unicode_range = [0x0000, 0xD7FF]
 
-# random if ascii letters or unicode
+# random if ascii letters or unicode; trips up
 s10 = "".join(
     (
         random.choice(string.ascii_letters)
@@ -70,17 +71,45 @@ s11 = "".join(
 s12 = "".join(chr(random.choice(range(256))) for _ in range(100))
 s13 = "".join(chr(random.choice(range(256))) for _ in range(100))
 
-# for ix, s in enumerate([s1, s2, s3, s4, s5,s6, s7, s8,s9,s10, s11,s12, s13]):
-for ix, s in enumerate([s10]):
+
+s14 = (  # all 3 slightly different, 'ᶑ' vs 'ᶁ', 'ế' vs 'ė' vs 'ć'; plus opus extra space on end
+    "Ḽơᶉëᶆ ȋṕšᶙṁ ḍỡḽǭᵳ ʂǐť ӓṁệẗ, ĉṓɲṩḙċťᶒțûɾ ấɖḯƥĭṩčįɳġ ḝłįʈ, șếᶑ ᶁⱺ ẽḭŭŝḿꝋď ṫĕᶆᶈṓɍ ỉñḉīḑȋᵭṵńť ṷŧ"
+    " ḹẩḇőꝛế éȶ đꝍꞎôꝛȇ ᵯáꞡᶇā ąⱡîɋṹẵ."
+)
+
+# returns empty string because of the prompt
+s15 = "�����������������������������"
+
+
+# Wasn't a consistent difference in number of bytes on the chars that are different
+def nb(char):
+    byte_sequence = char.encode("utf-8")  # Encode the character to UTF-8
+    number_of_bytes = len(byte_sequence)  # Count the bytes in the encoded version
+    return number_of_bytes
+
+
+for ix, s in enumerate([s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14]):
     o1 = tokenize_text(an_client_async, s, model="claude-3-opus-20240229")
     o2 = tokenize_text(an_client_async, s, model="claude-3-sonnet-20240229")
     o3 = tokenize_text(an_client_async, s, model="claude-3-haiku-20240307")
     good = [o1 == o2, o2 == o3, o1 == o3]
+    for m, l in zip(
+        ["opus", "sonnet", "haiku"],
+        [o1[0], o2[0], o3[0]],
+    ):
+        if "".join(l) != s:
+            print(f"WARN: {ix} model {m} wrong on `{s}`")
+
     if not all(good):
+        print(ix, s)
+        print(good)
         print(o1, o2, o3, sep="\n")
-        print(ix, good)
-        assert False, s
-    print(f"finished {ix},              {s}")
+        print([(ix, i, j) for ix, (i, j) in enumerate(zip(o1[0], o2[0])) if i != j])
+        print([(ix, i, j) for ix, (i, j) in enumerate(zip(o2[0], o3[0])) if i != j])
+        print([(ix, i, j) for ix, (i, j) in enumerate(zip(o1[0], o3[0])) if i != j])
+        # assert False, s
+    else:
+        print(f"checked {ix},              {s}")
 
 
 # %% Anthropic can print out all the chars in each token.
