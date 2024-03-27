@@ -49,7 +49,7 @@ s9 = "".join(random.choice(string.ascii_letters) for _ in range(100))
 
 unicode_range = [0x0000, 0xD7FF]
 
-# random if ascii letters or unicode; trips up
+# random if ascii letters or unicode; sometimes trips up
 s10 = "".join(
     (
         random.choice(string.ascii_letters)

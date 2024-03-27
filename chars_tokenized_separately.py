@@ -16,8 +16,8 @@ import glob
 import re
 import gc
 
-from sklearn.decomposition import PCA
-from sklearn.linear_model import LogisticRegression
+# from sklearn.decomposition import PCA
+# from sklearn.linear_model import LogisticRegression
 
 # from pyarrow import parquet as pq
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +41,7 @@ from src.utils import (
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
+
 ORD_USE_BETWEEN = [
     0,  # most unique
     8,  # the delete char
@@ -593,9 +594,15 @@ final_chat_df_cos_dist_english = pd.read_pickle(
 # %%
 # Utils to setup result frames
 def make_results_frame(
-    final_chat_df, ord_vals=ORD_USE_BETWEEN + [None], model="gpt-4-0613", make_new_convo=None
+    final_chat_df,
+    ord_vals=ORD_USE_BETWEEN + [None],
+    model="gpt-4-0613",
+    make_new_convo=None,
+    enc=None,
 ):
-    if model not in ("gpt-4-0125-preview", "gpt-4-1106-preview", "gpt-4-0613"):
+    if model not in ("gpt-4-0125-preview", "gpt-4-1106-preview", "gpt-4-0613") or (
+        model in ("claude-3-opus-20240229") and enc != "anthropic"
+    ):
         print(f"WARN: model {model} not expected")
     new_dfs = []
     for ord_val in ord_vals:
@@ -612,7 +619,9 @@ def make_results_frame(
             # Apply transformations and store results in the new DataFrame
             _r_df["manipulation"] = [{"kind": "between", "sep": sep}] * len(_r_df)
             _r_df["sent_convo"] = final_chat_df["conversation"].apply(
-                lambda convo: [{**d, "content": between_tokens(d["content"], sep)} for d in convo]
+                lambda convo: [
+                    {**d, "content": between_tokens(d["content"], sep, enc=enc)} for d in convo
+                ]
             )
             if make_new_convo is not None:
                 _r_df["sent_convo"] = _r_df.apply(make_new_convo, axis=1)
@@ -636,7 +645,8 @@ def prepend_prompt(prompt_fn, sep, convo, role="system"):
     return [{"content": prompt, "role": role}] + convo
 
 
-# %% #### Fill out the result frames for OpenAI
+# %%
+# #### Fill out the result frames for OpenAI by cos dist
 
 results_frame_cos_dist = make_results_frame(
     final_chat_df_cos_dist,
@@ -720,37 +730,47 @@ results_frame2["sent_convo"] = results_frame2["sent_convo"].apply(
         else end_of_convo(convo, max_tokens=8192 - 500)
     )
 )
+
+
 # %%
-import os
-import pandas as pd
+#### Fill out the result frames for other models, from dfc where got 'worst' on OAI
+final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_f1978a7.pkl")
 
 
-def search_pickles(directory, search_string):
-    for filename in os.listdir(directory):
-        if "result" in filename and filename.endswith(".pkl"):
-            df = pd.read_pickle(os.path.join(directory, filename))
-            if (
-                "sent_convo" in df
-                and df["sent_convo"].apply(lambda r: search_string in str(r)).any()
-            ):
-                print(f"String found in file {filename}, column sent_convo")
-                break
-            else:
-                print("Not", filename)
+def _framec_for_new_model(model, enc):
+    steps = []
+    for o in [8, 192, None]:
+        steps += [
+            make_results_frame(
+                final_chat_dfc,
+                ord_vals=[o],
+                model=model,
+                make_new_convo=lambda r: prepend_prompt(
+                    make_prompt13,
+                    r["manipulation"]["sep"],
+                    r["sent_convo"],
+                    role="system",
+                ),
+                enc=enc,
+            )
+        ]
+        print(o)
+    an_results_framec = pd.concat(steps)
+    return an_results_framec
 
 
-search_pickles("data_dump", "essential for identifying your responses")
-search_pickles("data_dump/oai_mod", "It's essential for identifying your responses.")
-# %%
-#### Fill out the result frames for Anthropic
-an_results_frame = results_frame.copy(deep=True)
-an_results_framec = results_framec.copy(deep=True)
-an_results_frame.head()
+an_results_framec = _framec_for_new_model(model="claude-3-opus-20240229", enc="anthropic")
+an_results_framec.to_pickle(f"data_dump/an_mod/results_framec_{git_hash()}.pkl")
+print(an_results_framec)
+
+gemini_results_framec = _framec_for_new_model(model="gemini-pro", enc="gemma7b")
+gemini_results_framec.to_pickle(f"data_dump/gemini/results_framec_{git_hash()}.pkl")
+print(gemini_results_framec)
 
 
 # %%
 # WARN: MAKES REQUESTS
-def get_chat_completion(model, s, sep=None, client=client, **kwargs):
+def get_chat_completion(model, s, sep=None, req_client=client, **kwargs):
     if isinstance(s, str):
         messages = [
             {
@@ -768,7 +788,7 @@ def get_chat_completion(model, s, sep=None, client=client, **kwargs):
                 kwargs, "stop", ["Sorry, ", "I'm sorry", "I apologize", "I'm really sorry"]
             )
             kwargs["max_tokens"] = getattr(kwargs, "max_tokens", 500)
-            response = client.chat.completions.create(
+            response = req_client.chat.completions.create(
                 model=model,
                 messages=messages,
                 **kwargs,
@@ -789,6 +809,7 @@ def get_chat_completion(model, s, sep=None, client=client, **kwargs):
                 out = out.replace(sep, "")
             for i in range(4):
                 try:
+                    # always OAI client for mod
                     mod = client.moderations.create(input=out, model="text-moderation-stable")
                 except:
                     time.sleep(1.5**i)  # haven't every seen this rate limit
@@ -807,7 +828,7 @@ def fill_out_results(df_frame, n_loops=1, client=client):
                 zip(
                     *executor.map(
                         lambda mcsep: get_chat_completion(
-                            mcsep[0], mcsep[1], sep=mcsep[2], client=client
+                            mcsep[0], mcsep[1], sep=mcsep[2], req_client=client
                         ),
                         zip(
                             results_df["new_model"][missing_ix],
@@ -830,26 +851,26 @@ def fill_out_results(df_frame, n_loops=1, client=client):
     return results_df
 
 
-# # For testing first
-# base_df=results_frame_ft1
-# #test_slice = slice(-10, None)
-# test_slice = slice(0,10, None)
-# r = copy.deepcopy(base_df.iloc[test_slice])
-# _r = copy.deepcopy(r)
-# r = fill_out_results(r)
-# # where different
-# print(r.compare(_r))
-# plt.hist(
-#     r.compare(_r)["new_oai_mod"]["self"].apply(chat_max_scores),
-# )
-# plt.show()
-# plt.hist(
-#     _r[~_r["new_oai_mod"].isna()]["new_oai_mod"].apply(chat_max_scores),
-# )
-# base_df["new_oai_mod"].iloc[test_slice], base_df["new_completion"].iloc[test_slice] = (
-#     r["new_oai_mod"],
-#     r["new_completion"],
-# )
+# For testing first
+base_df = None
+if False:
+    test_slice = slice(0, 10, None)
+    r = copy.deepcopy(base_df.iloc[test_slice])
+    _r = copy.deepcopy(r)
+    r = fill_out_results(r)
+    # where different
+    print(r.compare(_r))
+    plt.hist(
+        r.compare(_r)["new_oai_mod"]["self"].apply(chat_max_scores),
+    )
+    plt.show()
+    plt.hist(
+        _r[~_r["new_oai_mod"].isna()]["new_oai_mod"].apply(chat_max_scores),
+    )
+    base_df["new_oai_mod"].iloc[test_slice], base_df["new_completion"].iloc[test_slice] = (
+        r["new_oai_mod"],
+        r["new_completion"],
+    )
 
 # results_df = fill_out_results(results_frame)
 # results_df.to_pickle(f"data_dump/results_df_01_24_{git_hash()}.pkl")
@@ -967,6 +988,8 @@ results_df_ft2_from_comp = fill_out_results(results_df_ft2_from_comp)
 results_df_ft2_from_comp.to_pickle(
     f"data_dump/oai_mod/results_finetune2_from_comp_{git_hash()}.pkl"
 )
+
+# %%
 
 
 # %% # analysis pre-processing

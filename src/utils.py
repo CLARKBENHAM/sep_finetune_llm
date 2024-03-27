@@ -1,12 +1,11 @@
 # %%
 import time
-import requests
-
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 import re
 from urllib3.util import Retry
+import requests
 from requests.adapters import HTTPAdapter
 import tiktoken
 from openai import OpenAI
@@ -19,7 +18,8 @@ nest_asyncio.apply()
 
 from anthropic import Anthropic, AsyncAnthropic
 
-from src.anthropic_tokenizer import AnthropicEncoding
+from src.anthropic_tokenizer import AnthropicTokenizer
+from src.gemma_tokenizer import GemmaTokenizer
 
 an_client_async = AsyncAnthropic()
 an_client_sync = Anthropic()
@@ -43,7 +43,8 @@ SEP = "@"
 
 encoding = tiktoken.encoding_for_model("gpt-4")  # gpt-3.5 to 4 use same encoder: 100k
 # tiktoken.encoding_name_for_model("gpt-4") == tiktoken.encoding_name_for_model("gpt-3.5-turbo-instruct")
-anthropic_encoding = AnthropicEncoding(an_client_async)
+anthropic_encoding = AnthropicTokenizer(an_client_async)
+gemma_encoding7b = GemmaTokenizer()
 
 
 def get_mod(s, openai_api_key=openai_api_key):
@@ -98,11 +99,17 @@ def text_w_sep(s, sep=SEP):
     return s
 
 
-def between_tokens(s, sep, enc=encoding):
+def between_tokens(s, sep, enc=None):
     """
     Returns a new string that will tokenize to as the original would
     but with tokenized(sep) between each old token
     """
+    if enc is None or enc == "openai":
+        enc = encoding
+    elif enc == "anthropic":
+        enc = anthropic_encoding
+    elif enc == "gemma7b":
+        enc = gemma_encoding7b
     tokens = enc.encode(s)
     sep_token = enc.encode(sep)
     new_tokens = [i for t in tokens for i in (t, *sep_token)]  # ? [: -len(sep_token)]

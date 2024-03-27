@@ -5,32 +5,46 @@ import asyncio
 import json
 
 
-async def get_tokens(client, to_tokenize: str, model=None) -> None:
-    if model is None:
-        model = "claude-3-opus-20240229"
-    tokens = []
-    async with client.messages.stream(
-        max_tokens=1000,
-        system=(
-            "Copy the text between <tocopy> markers. Include trailing spaces or breaklines. Do not"
-            " write anything else. One example \nInput: <tocopy>Example sentence.</tocopy>\nOutput:"
-            " Example sentence."
-        ),
-        messages=[
-            {
-                "role": "user",
-                "content": f"<tocopy>{to_tokenize}</tocopy>",
-            }
-        ],
-        model=model,
-    ) as stream:
-        async for event in stream:
-            if event.type == "content_block_delta":
-                tokens.append(event.delta.text)
-            if event.type == "message_delta":
-                total_tokens_usage = event.usage.output_tokens
+async def get_tokens(client, to_tokenize: str, model=None, max_retries=5, backoff_factor=2) -> None:
+    """
+    Model defaults to haiku
+    test_tokenization.py showed they're the same, unless models were getting it wrong
+    """
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            if model is None:
+                model = "claude-3-haiku-20240307"
+            tokens = []
+            async with client.messages.stream(
+                max_tokens=1000,
+                system=(
+                    "Copy the text between <tocopy> markers. Include trailing spaces or breaklines."
+                    " Do not write anything else. One example \nInput: <tocopy>Example"
+                    " sentence.</tocopy>\nOutput: Example sentence."
+                ),
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"<tocopy>{to_tokenize}</tocopy>",
+                    }
+                ],
+                model=model,
+            ) as stream:
+                async for event in stream:
+                    if event.type == "content_block_delta":
+                        tokens.append(event.delta.text)
+                    if event.type == "message_delta":
+                        total_tokens_usage = event.usage.output_tokens
 
-    return tokens, total_tokens_usage
+            return tokens, total_tokens_usage
+        except Exception as e:
+            print("ignoring", e)
+            attempt += 1
+            if attempt >= max_retries:
+                raise
+            sleep_time = backoff_factor**attempt
+            await asyncio.sleep(sleep_time)
 
 
 def tokenize_text(client, to_tokenize: str, model=None) -> None:
@@ -38,7 +52,7 @@ def tokenize_text(client, to_tokenize: str, model=None) -> None:
     return tokens, total_tokens_usage
 
 
-class AnthropicEncoding:
+class AnthropicTokenizer:
     """WARN: SLOW!! Makes Requests"""
 
     def __init__(self, client):
