@@ -759,10 +759,55 @@ def _framec_for_new_model(model, enc):
     return an_results_framec
 
 
+# since anthropic made by echoing back results this requires a post filter
 an_results_framec = _framec_for_new_model(model="claude-3-opus-20240229", enc="anthropic")
 an_results_framec.to_pickle(f"data_dump/an_mod/results_framec_{git_hash()}.pkl")
 print(an_results_framec)
 
+
+# %%
+def words_to_counter(r, split_chars=f" {chr(8)}{chr(192)}"):
+    return Counter(re.split(f"[{split_chars}]", " ".join([d["content"] for d in r[1:]])))
+
+
+def _calculate_similarity(row):
+    an_tokens = words_to_counter(row["sent_convo"])
+    final_tokens = words_to_counter(row["conversation"])
+
+    intersection = an_tokens & final_tokens
+    return sum(intersection.values()) / sum(an_tokens.values())
+
+
+# Assuming 'an_results_framec' and 'final_chat_dfc' are the column names
+merged_df = pd.merge(an_results_framec, final_chat_dfc, left_index=True, right_index=True)
+merged_df = merged_df[["sent_convo", "conversation"]]
+merged_df["similarity"] = merged_df.apply(_calculate_similarity, axis=1)
+
+# Check if similarity is greater than or equal to 0.7
+merged_df["is_similar"] = merged_df["similarity"] >= 0.7
+merged_df["is_similar"]
+# %%
+from itertools import combinations
+
+
+def count_overlaps(grouped):
+    overlaps = {}
+    for group1, group2 in combinations(grouped.groups.keys(), 2):
+        index1 = set(grouped.get_group(group1).index)
+        index2 = set(grouped.get_group(group2).index)
+        overlap = len(index1 & index2)
+        overlaps[(group1, group2)] = overlap
+    return overlaps
+
+
+filtered_series = an_results_framec["manipulation"].apply(str)[merged_df["is_similar"].values]
+grouped = filtered_series.groupby(filtered_series)
+grouped.apply(lambda g: set(g.index))
+overlaps = count_overlaps(grouped)
+overlaps
+# why isn't there more overlap? anthropic should've got the same text all 3 times
+
+# %%
 gemini_results_framec = _framec_for_new_model(model="gemini-pro", enc="gemma7b")
 gemini_results_framec.to_pickle(f"data_dump/gemini/results_framec_{git_hash()}.pkl")
 print(gemini_results_framec)
@@ -771,6 +816,7 @@ print(gemini_results_framec)
 # %%
 # WARN: MAKES REQUESTS
 def get_chat_completion(model, s, sep=None, req_client=client, **kwargs):
+    # always use OAI 'client' for mod
     if isinstance(s, str):
         messages = [
             {
@@ -809,7 +855,6 @@ def get_chat_completion(model, s, sep=None, req_client=client, **kwargs):
                 out = out.replace(sep, "")
             for i in range(4):
                 try:
-                    # always OAI client for mod
                     mod = client.moderations.create(input=out, model="text-moderation-stable")
                 except:
                     time.sleep(1.5**i)  # haven't every seen this rate limit

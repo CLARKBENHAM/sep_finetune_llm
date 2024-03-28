@@ -60,20 +60,6 @@ class GemmaTokenizer:
             output_dir = "data_dump/gemini/gemma/7b"
             download_files(repo_id, filenames, output_dir)
 
-            # for url in GemmaTokenizer.variant2links[variant]:
-            #    # Extract the file name from the URL
-            #    filename = weights_dir + "/" + url.split("/")[-1]
-            #    # Send a GET request to the URL
-            #    response = http.get(url, headers=headers)
-            #    print(response, dir(response))
-            #    print(response.raw, response.request, response.text)
-            #    # Check if the request was successful
-            #    assert response.status_code == 200, response
-            #    # Write the content of the response to a file
-            #    with open(filename, "wb") as file:
-            #        file.write(response.content)
-            #    print(f"Downloaded {filename}")
-
             tokenizer_path = os.path.join(output_dir, "tokenizer.model")
 
         # Reload tokenizer.
