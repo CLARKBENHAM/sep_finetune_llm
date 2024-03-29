@@ -738,12 +738,9 @@ final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_f1978a7.pkl")
 
 
 def _framec_for_new_model(model, enc):
-    steps = []
-    for o in [8, 192, None]:
-        steps += [
-            make_results_frame(
+    return make_results_frame(
                 final_chat_dfc,
-                ord_vals=[o],
+                ord_vals=[8, 192, None],
                 model=model,
                 make_new_convo=lambda r: prepend_prompt(
                     make_prompt13,
@@ -753,12 +750,26 @@ def _framec_for_new_model(model, enc):
                 ),
                 enc=enc,
             )
-        ]
-        print(o)
-    an_results_framec = pd.concat(steps)
-    return an_results_framec
 
+# Things for SPAR activation steering
+oa_results_framec = _framec_for_new_model(model="gpt-4-0613", enc="openai")
+assert oa_results_framec.equals(results_framec.query('new_model=="gpt-4-0613"'))
+oa_results_framec.to_pickle(f"data_dump/oa_results_framec_{git_hash()}.pkl")
+oa_results_framec = pd.read_pickle("data_dump/oa_results_framec_c10ac43.pkl")
 
+gemini_results_framec = _framec_for_new_model(model="gemini-pro", enc="gemma7b")
+gemini_results_framec.to_pickle(f"data_dump/gemini/results_framec_{git_hash()}.pkl")
+print(gemini_results_framec)
+gemini_results_framec = pd.read_pickle("data_dump/gemini/results_framec_9f5eef6.pkl")
+
+llama_results_framec = _framec_for_new_model(model="llama-70b", enc="llama2")
+llama_results_framec.to_pickle(f"data_dump/llama/results_framec_{git_hash()}.pkl")
+llama_results_framec = pd.read_pickle("data_dump/llama/results_framec_c10ac43.pkl")
+print(llama_results_framec)
+print(llama_results_framec['sent_convo'].compare(gemini_results_framec['sent_convo']))
+print(llama_results_framec['sent_convo'].compare(oa_results_framec['sent_convo']))
+
+#%%
 # since anthropic made by echoing back results this requires a post filter
 an_results_framec = _framec_for_new_model(model="claude-3-opus-20240229", enc="anthropic")
 an_results_framec.to_pickle(f"data_dump/an_mod/results_framec_{git_hash()}.pkl")
@@ -786,7 +797,7 @@ merged_df["similarity"] = merged_df.apply(_calculate_similarity, axis=1)
 # Check if similarity is greater than or equal to 0.7
 merged_df["is_similar"] = merged_df["similarity"] >= 0.7
 merged_df["is_similar"]
-# %%
+
 from itertools import combinations
 
 
@@ -807,10 +818,6 @@ overlaps = count_overlaps(grouped)
 overlaps
 # why isn't there more overlap? anthropic should've got the same text all 3 times
 
-# %%
-gemini_results_framec = _framec_for_new_model(model="gemini-pro", enc="gemma7b")
-gemini_results_framec.to_pickle(f"data_dump/gemini/results_framec_{git_hash()}.pkl")
-print(gemini_results_framec)
 
 
 # %%
@@ -902,7 +909,7 @@ if False:
     test_slice = slice(0, 10, None)
     r = copy.deepcopy(base_df.iloc[test_slice])
     _r = copy.deepcopy(r)
-    r = fill_out_results(r)
+    r = fill_out_results(r
     # where different
     print(r.compare(_r))
     plt.hist(

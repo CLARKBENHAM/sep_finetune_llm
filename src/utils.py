@@ -20,6 +20,7 @@ from anthropic import Anthropic, AsyncAnthropic
 
 from src.anthropic_tokenizer import AnthropicTokenizer
 from src.gemma_tokenizer import GemmaTokenizer
+from src.llama2_tokenizer import LlamaTokenizer
 
 an_client_async = AsyncAnthropic()
 an_client_sync = Anthropic()
@@ -45,6 +46,7 @@ encoding = tiktoken.encoding_for_model("gpt-4")  # gpt-3.5 to 4 use same encoder
 # tiktoken.encoding_name_for_model("gpt-4") == tiktoken.encoding_name_for_model("gpt-3.5-turbo-instruct")
 anthropic_encoding = AnthropicTokenizer(an_client_async)
 gemma_encoding7b = GemmaTokenizer()
+llama2_encoding70bchat = LlamaTokenizer()
 
 
 def get_mod(s, openai_api_key=openai_api_key):
@@ -104,12 +106,16 @@ def between_tokens(s, sep, enc=None):
     Returns a new string that will tokenize to as the original would
     but with tokenized(sep) between each old token
     """
-    if enc is None or enc == "openai":
+    if enc is not None and not isinstance(enc, str):
+        pass
+    elif enc is None or enc == "openai":  # default
         enc = encoding
     elif enc == "anthropic":
         enc = anthropic_encoding
-    elif enc == "gemma7b":
+    elif enc == "gemma7b" or "gemma" in enc:
         enc = gemma_encoding7b
+    elif enc == "llama2_encoding70bchat" or "llama" in enc:
+        enc = llama2_encoding70bchat
     tokens = enc.encode(s)
     sep_token = enc.encode(sep)
     new_tokens = [i for t in tokens for i in (t, *sep_token)]  # ? [: -len(sep_token)]
@@ -240,4 +246,17 @@ def git_hash():
     return os.popen("git rev-parse --short HEAD").read().strip()
 
 
+if False:
+    l = gemma_encoding7b  # llama2_encoding70bchat
+    c = chr(192)
+    s = (
+        "It seems like you want to compare two dataframes oa_results_framec and results_framec."
+        " However, there's a typo in your code. The correct method is compare(), not comapare()."
+        " Here's how you can use it:"
+    )
+    assert s == l.decode(l.encode(s))
+    print(l.encode(s))
+    print(between_tokens(s, c, l))
+    print(between_tokens(s, c, l).replace(c, ""))
+    print(l.encode(between_tokens(s, c, l)))
 # %%

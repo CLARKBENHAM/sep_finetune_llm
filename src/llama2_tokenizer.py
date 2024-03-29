@@ -44,15 +44,12 @@ def download_files(repo_id, filenames, output_dir):
         print(f"Downloaded {filename} to {file_path}")
 
 
-class GemmaTokenizer:
-    def __init__(self, tokenizer_path="data_dump/gemini/gemma/7b/tokenizer.model", variant="7b"):
-        """Note: gemma always have a '2' as the first token for '',
-        assume gemma similar to Gemini-pro; it's same tokenizer type and train on similar data
-        # Assume the tokenizers the same across versions, but haven't tested that
-        # https://huggingface.co/google/gemma-7b/tree/main
-        """
+class LlamaTokenizer:
+    def __init__(self, tokenizer_path="data_dump/llama/70b-chat/tokenizer.model", variant="70b"):
+        # https://huggingface.co/meta-llama/Llama-2-70b-chat-hf/resolve/main/tokenizer.model?download=true
         self.variant = variant
         if tokenizer_path is None:
+            assert False
             assert variant == "7b"
             repo_id = f"google/gemma-{variant}"
             filenames = [
@@ -60,7 +57,7 @@ class GemmaTokenizer:
                 "tokenizer.model",
                 "tokenizer_config.json",
             ]
-            output_dir = "data_dump/gemini/gemma/7b"
+            output_dir = "data_dump/llama2/"
             download_files(repo_id, filenames, output_dir)
 
             tokenizer_path = os.path.join(output_dir, "tokenizer.model")
