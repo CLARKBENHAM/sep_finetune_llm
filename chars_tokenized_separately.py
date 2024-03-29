@@ -734,6 +734,9 @@ results_frame2["sent_convo"] = results_frame2["sent_convo"].apply(
 
 # %%
 #### Fill out the result frames for other models, from dfc where got 'worst' on OAI
+importlib.reload(src.utils)
+from src.utils import *
+
 final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_f1978a7.pkl")
 
 
@@ -751,23 +754,77 @@ def _framec_for_new_model(model, enc):
                 enc=enc,
             )
 
+# # Things for SPAR activation steering
+# oa_results_framec = _framec_for_new_model(model="gpt-4-0613", enc="openai")
+# assert oa_results_framec.equals(results_framec.query('new_model=="gpt-4-0613"'))
+# oa_results_framec.to_pickle(f"data_dump/oa_results_framec_{git_hash()}.pkl")
+# oa_results_framec = pd.read_pickle("data_dump/oa_results_framec_c10ac43.pkl")
+#
+# gemini_results_framec = _framec_for_new_model(model="gemini-pro", enc="gemma7b")
+# gemini_results_framec.to_pickle(f"data_dump/gemini/results_framec_{git_hash()}.pkl")
+# print(gemini_results_framec)
+# gemini_results_framec = pd.read_pickle("data_dump/gemini/results_framec_9f5eef6.pkl")
+#
+# llama_results_framec = _framec_for_new_model(model="llama-70b", enc="llama2")
+# llama_results_framec.to_pickle(f"data_dump/llama/results_framec_{git_hash()}.pkl")
+# llama_results_framec = pd.read_pickle("data_dump/llama/results_framec_c10ac43.pkl")
+
+
+def _make_caa_results_json(
+    ord_vals=[192],
+    model="gpt-4-0613",
+    enc=None,
+    file=None
+):
+    mx_toks=(4096-100)//2
+
+    #make_new_convo=lambda r: prepend_prompt(
+    #    make_prompt13,
+    #    r["manipulation"]["sep"],
+    #    r["sent_convo"],
+    #    role="system",
+    #)
+
+    new_dfs = []
+    for ord_val in ord_vals:
+        _r_df = pd.DataFrame(index=final_chat_dfc.index)
+        _r_df['question'] = ''
+        _r_df['model'] = model
+        _r_df['encoding'] = enc
+        sep = chr(ord_val)
+        _r_df["manipulation"] = [{"kind": "between", "sep": sep, "has_system_prompt":False}] * len(_r_df)
+
+        short_text = final_chat_dfc["conversation"].apply(lambda convo: chat_to_str(end_of_convo(convo, max_tokens=mx_toks, enc=enc, strip_first_assistant=False) )).copy()
+
+        _r_df["answer_not_matching_behavior"] = short_text
+        # sep token is matching behavior
+        #_r_df["sent_convo"] =  # if using _r_df.apply(make_new_convo, axis=1)
+
+        _r_df["answer_matching_behavior"] = short_text.apply(
+            lambda s: between_tokens(s, sep, enc=enc)
+        )
+
+        #del _r_df["sent_convo"]
+
+        new_dfs += [_r_df]
+
+    data_as_dict = pd.concat(new_dfs).to_dict(orient='records')
+    with open(file, 'w', encoding='utf-8') as file:
+        json.dump(data_as_dict, file, ensure_ascii=False, indent=4)
+    return data_as_dict
+
+# scp -P 17223 data_dump/gemini/caa_json_hack_b1f934c.json  root@213.173.102.4:/workspace/sep_token_datasets/gemma7b_caa_json_hack_b1f934c.json
+#
+# scp -P 17223 data_dump/oa_caa_json_hack_b1f934c.json root@213.173.102.4:/workspace/sep_token_datasets/oa_caa_json_hack_b1f934c.json
+#
+# scp -P 17223 data_dump/llama/caa_json_hack_b1f934c.json  root@213.173.102.4:/workspace/sep_token_datasets/llama70b_caa_json_hack_b1f934c.json
+
+
 # Things for SPAR activation steering
-oa_results_framec = _framec_for_new_model(model="gpt-4-0613", enc="openai")
-assert oa_results_framec.equals(results_framec.query('new_model=="gpt-4-0613"'))
-oa_results_framec.to_pickle(f"data_dump/oa_results_framec_{git_hash()}.pkl")
-oa_results_framec = pd.read_pickle("data_dump/oa_results_framec_c10ac43.pkl")
-
-gemini_results_framec = _framec_for_new_model(model="gemini-pro", enc="gemma7b")
-gemini_results_framec.to_pickle(f"data_dump/gemini/results_framec_{git_hash()}.pkl")
-print(gemini_results_framec)
-gemini_results_framec = pd.read_pickle("data_dump/gemini/results_framec_9f5eef6.pkl")
-
-llama_results_framec = _framec_for_new_model(model="llama-70b", enc="llama2")
-llama_results_framec.to_pickle(f"data_dump/llama/results_framec_{git_hash()}.pkl")
-llama_results_framec = pd.read_pickle("data_dump/llama/results_framec_c10ac43.pkl")
-print(llama_results_framec)
-print(llama_results_framec['sent_convo'].compare(gemini_results_framec['sent_convo']))
-print(llama_results_framec['sent_convo'].compare(oa_results_framec['sent_convo']))
+oa_caa_json_hack = _make_caa_results_json(model="gpt-4-0613", enc="openai", file=f"data_dump/oa_caa_json_hack_{git_hash()}.json")
+gemini_caa_json_hack = _make_caa_results_json(model="gemini-pro", enc="gemma7b", file=f"data_dump/gemini/gemma7b_caa_json_hack_{git_hash()}.json")
+llama_caa_json_hack = _make_caa_results_json(model="llama-70b", enc="llama2", file=f"data_dump/llama/llama70b_json_hack_{git_hash()}.json")
+llama_caa_json_hack
 
 #%%
 # since anthropic made by echoing back results this requires a post filter

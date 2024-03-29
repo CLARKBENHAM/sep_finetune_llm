@@ -75,13 +75,14 @@ def num_tokens_from_messages(
     messages,
     tokens_per_message=3,
     tokens_per_name=1,
-    enc=encoding,
+    enc=None,
 ):
     """
     theres an overhead of 3 tokens for the overall message
         because every reply is primed with <|start|>assistant<|message|>
     plus 3 tokens for each content/role response
     """
+    enc = get_enc(enc)
     num_tokens = 0
     for message in messages:
         num_tokens += tokens_per_message
@@ -101,11 +102,7 @@ def text_w_sep(s, sep=SEP):
     return s
 
 
-def between_tokens(s, sep, enc=None):
-    """
-    Returns a new string that will tokenize to as the original would
-    but with tokenized(sep) between each old token
-    """
+def get_enc(enc=None):
     if enc is not None and not isinstance(enc, str):
         pass
     elif enc is None or enc == "openai":  # default
@@ -116,6 +113,15 @@ def between_tokens(s, sep, enc=None):
         enc = gemma_encoding7b
     elif enc == "llama2_encoding70bchat" or "llama" in enc:
         enc = llama2_encoding70bchat
+    return enc
+
+
+def between_tokens(s, sep, enc=None):
+    """
+    Returns a new string that will tokenize to as the original would
+    but with tokenized(sep) between each old token
+    """
+    enc = get_enc(enc)
     tokens = enc.encode(s)
     sep_token = enc.encode(sep)
     new_tokens = [i for t in tokens for i in (t, *sep_token)]  # ? [: -len(sep_token)]
@@ -147,7 +153,7 @@ def balance_text(st, split_on="\n", mx_len=MX_TOKENS // 20):
     return chunks
 
 
-def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding, strip_first_assistant=True):
+def end_of_convo(convo, max_tokens=MX_TOKENS, enc=None, strip_first_assistant=True):
     """
     Take as many tokens as possible from the 'end' of a chat conversation.
     Make user give first and last message, and total convo length is less than max_tokens.
@@ -156,6 +162,7 @@ def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding, strip_first_assistan
     strip_first_assistant: If want to make the user be the first message
     """
     # Sending any message, regardless of length has a 3 token cost
+    enc = get_enc(enc)
     max_tokens -= 3
     max_tokens -= 5  # just for wiggle room
     convo = convo[:-1] if strip_first_assistant and convo[-1]["role"] == "assistant" else convo
@@ -178,19 +185,21 @@ def end_of_convo(convo, max_tokens=MX_TOKENS, enc=encoding, strip_first_assistan
     return out
 
 
-def take_last_tokens(c, max_tokens=MX_TOKENS, enc=encoding):
+def take_last_tokens(c, max_tokens=MX_TOKENS, enc=None):
     """
     converts a string to only having at most max_tokens, taken from end of c
     useful when insert non-single token characters and need to have long completions
     """
+    enc = get_enc(enc)
     return enc.decode(enc.encode(c)[-max_tokens:])
 
 
-def take_first_tokens(c, max_tokens=MX_TOKENS, enc=encoding):
+def take_first_tokens(c, max_tokens=MX_TOKENS, enc=None):
     """
     converts a string to only having at most max_tokens, taken from start of c
     useful when insert non-single token characters and need to have long completions
     """
+    enc = get_enc(enc)
     return enc.decode(enc.encode(c)[:max_tokens])
 
 
