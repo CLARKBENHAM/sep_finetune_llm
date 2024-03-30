@@ -65,8 +65,23 @@ def get_mod(s, openai_api_key=openai_api_key):
     return [is_flagged, mx, s]
 
 
-def num_tokens_from_string(string: str, enc=encoding) -> int:
+def get_enc(enc=None):
+    if enc is not None and not isinstance(enc, str):
+        pass
+    elif enc is None or enc == "openai":  # default
+        enc = encoding
+    elif enc == "anthropic":
+        enc = anthropic_encoding
+    elif enc == "gemma7b" or "gemma" in enc:
+        enc = gemma_encoding7b
+    elif enc == "llama2_encoding70bchat" or "llama" in enc:
+        enc = llama2_encoding70bchat
+    return enc
+
+
+def num_tokens_from_string(string: str, enc=None) -> int:
     """Returns the number of tokens in a text string, same formula as above"""
+    enc = get_enc(enc)
     num_tokens = len(enc.encode(string))
     return num_tokens + 3
 
@@ -100,20 +115,6 @@ def text_w_sep(s, sep=SEP):
     s = re.sub(r"(\S)", rf"\1{sep}", s)
     # s = re.sub(r"([a-zA-Z0-9])", rf"\1{SEP}", s) # didn't like this
     return s
-
-
-def get_enc(enc=None):
-    if enc is not None and not isinstance(enc, str):
-        pass
-    elif enc is None or enc == "openai":  # default
-        enc = encoding
-    elif enc == "anthropic":
-        enc = anthropic_encoding
-    elif enc == "gemma7b" or "gemma" in enc:
-        enc = gemma_encoding7b
-    elif enc == "llama2_encoding70bchat" or "llama" in enc:
-        enc = llama2_encoding70bchat
-    return enc
 
 
 def between_tokens(s, sep, enc=None):

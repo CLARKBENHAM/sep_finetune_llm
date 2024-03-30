@@ -734,8 +734,6 @@ results_frame2["sent_convo"] = results_frame2["sent_convo"].apply(
 
 # %%
 #### Fill out the result frames for other models, from dfc where got 'worst' on OAI
-importlib.reload(src.utils)
-from src.utils import *
 
 final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_f1978a7.pkl")
 
@@ -754,7 +752,6 @@ def _framec_for_new_model(model, enc):
                 enc=enc,
             )
 
-# # Things for SPAR activation steering
 # oa_results_framec = _framec_for_new_model(model="gpt-4-0613", enc="openai")
 # assert oa_results_framec.equals(results_framec.query('new_model=="gpt-4-0613"'))
 # oa_results_framec.to_pickle(f"data_dump/oa_results_framec_{git_hash()}.pkl")
@@ -769,71 +766,12 @@ def _framec_for_new_model(model, enc):
 # llama_results_framec.to_pickle(f"data_dump/llama/results_framec_{git_hash()}.pkl")
 # llama_results_framec = pd.read_pickle("data_dump/llama/results_framec_c10ac43.pkl")
 
-
-def _make_caa_results_json(
-    ord_vals=[192],
-    model="gpt-4-0613",
-    enc=None,
-    file=None
-):
-    mx_toks=(4096-100)//2
-
-    #make_new_convo=lambda r: prepend_prompt(
-    #    make_prompt13,
-    #    r["manipulation"]["sep"],
-    #    r["sent_convo"],
-    #    role="system",
-    #)
-
-    new_dfs = []
-    for ord_val in ord_vals:
-        _r_df = pd.DataFrame(index=final_chat_dfc.index)
-        _r_df['question'] = ''
-        _r_df['model'] = model
-        _r_df['encoding'] = enc
-        sep = chr(ord_val)
-        _r_df["manipulation"] = [{"kind": "between", "sep": sep, "has_system_prompt":False}] * len(_r_df)
-
-        short_text = final_chat_dfc["conversation"].apply(lambda convo: chat_to_str(end_of_convo(convo, max_tokens=mx_toks, enc=enc, strip_first_assistant=False) )).copy()
-
-        _r_df["answer_not_matching_behavior"] = short_text
-        # sep token is matching behavior
-        #_r_df["sent_convo"] =  # if using _r_df.apply(make_new_convo, axis=1)
-
-        _r_df["answer_matching_behavior"] = short_text.apply(
-            lambda s: between_tokens(s, sep, enc=enc)
-        )
-
-        #del _r_df["sent_convo"]
-
-        new_dfs += [_r_df]
-
-    data_as_dict = pd.concat(new_dfs).to_dict(orient='records')
-    with open(file, 'w', encoding='utf-8') as file:
-        json.dump(data_as_dict, file, ensure_ascii=False, indent=4)
-    return data_as_dict
-
-# scp -P 17223 data_dump/gemini/caa_json_hack_b1f934c.json  root@213.173.102.4:/workspace/sep_token_datasets/gemma7b_caa_json_hack_b1f934c.json
-#
-# scp -P 17223 data_dump/oa_caa_json_hack_b1f934c.json root@213.173.102.4:/workspace/sep_token_datasets/oa_caa_json_hack_b1f934c.json
-#
-# scp -P 17223 data_dump/llama/caa_json_hack_b1f934c.json  root@213.173.102.4:/workspace/sep_token_datasets/llama70b_caa_json_hack_b1f934c.json
-
-
-# Things for SPAR activation steering
-oa_caa_json_hack = _make_caa_results_json(model="gpt-4-0613", enc="openai", file=f"data_dump/oa_caa_json_hack_{git_hash()}.json")
-gemini_caa_json_hack = _make_caa_results_json(model="gemini-pro", enc="gemma7b", file=f"data_dump/gemini/gemma7b_caa_json_hack_{git_hash()}.json")
-llama_caa_json_hack = _make_caa_results_json(model="llama-70b", enc="llama2", file=f"data_dump/llama/llama70b_json_hack_{git_hash()}.json")
-llama_caa_json_hack
-
-#%%
 # since anthropic made by echoing back results this requires a post filter
 an_results_framec = _framec_for_new_model(model="claude-3-opus-20240229", enc="anthropic")
 an_results_framec.to_pickle(f"data_dump/an_mod/results_framec_{git_hash()}.pkl")
 print(an_results_framec)
-
-
-# %%
+#%% #TODO: test anthropic, model refused to "continue" some sentances
+# Checking anthropic "tokenizer"
 def words_to_counter(r, split_chars=f" {chr(8)}{chr(192)}"):
     return Counter(re.split(f"[{split_chars}]", " ".join([d["content"] for d in r[1:]])))
 
@@ -876,6 +814,88 @@ overlaps
 # why isn't there more overlap? anthropic should've got the same text all 3 times
 
 
+#%%
+from math import floor
+final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_f1978a7.pkl")
+analysis_dfc = pd.read_pickle("data_dump/analysis_dfc_02_02_f1978a7.pkl")
+
+analysis_df = pd.read_pickle("data_dump/analysis_df_new_model_02_13_f17eae7.pkl")
+
+def get_top(final_chat_dfc, analysis_dfc):
+    sim_sent=analysis_dfc.query('new_model=="gpt-4-0613"')
+    sim_sent = sim_sent[sim_sent['manipulation'].apply(lambda d: ord(d['sep'])==192)]
+    sim_sent.columns
+    difference = sim_sent['new_max_scores'] - sim_sent['gpt40613_max_scores']
+    indices_of_largest = difference.nlargest(50).index
+    indices_of_largest = list(indices_of_largest)
+    caa_final_chat_df = final_chat_dfc.loc[indices_of_largest]
+    return caa_final_chat_df
+
+caa_final_chat_df = get_top(final_chat_dfc, analysis_dfc)
+caa_final_chat_df_test= get_top(final_chat_df, analysis_df)
+
+def _make_caa_results_json(
+    ord_vals=[192],
+    model="gpt-4-0613",
+    enc=None,
+    file=None,
+    _chat_dfc = caa_final_chat_df
+):
+    mx_toks=1500 #floor((4096-100)/1.5)
+
+    #make_new_convo=lambda r: prepend_prompt(
+    #    make_prompt13,
+    #    r["manipulation"]["sep"],
+    #    r["sent_convo"],
+    #    role="system",
+    #)
+    new_dfs = []
+    for ord_val in ord_vals:
+        _r_df = pd.DataFrame(index=_chat_dfc.index).reset_index()
+
+        _r_df['question'] = ''
+        _r_df['model'] = model
+        _r_df['encoding'] = enc
+        sep = chr(ord_val)
+        _r_df["manipulation"] = [{"kind": "between", "sep": sep, "has_system_prompt":False}] * len(_r_df)
+
+        #print(_chat_dfc["conversation"].apply(lambda l: sum(map(len,l))).describe())
+        short_text = _chat_dfc["conversation"].apply(lambda convo: chat_to_str(end_of_convo(convo, max_tokens=mx_toks, enc='llama70b', strip_first_assistant=False) )).copy()
+        #print(short_text.apply(len).describe())
+
+        _r_df["answer_not_matching_behavior"] = short_text
+        # sep token is matching behavior
+        #_r_df["sent_convo"] =  # if using _r_df.apply(make_new_convo, axis=1)
+
+        _r_df["answer_matching_behavior"] = short_text.apply(
+            lambda s: between_tokens(s, sep, enc=enc)
+        )
+
+        #del _r_df["sent_convo"]
+
+        new_dfs += [_r_df]
+
+    data_as_dict = pd.concat(new_dfs).to_dict(orient='records')
+    with open(file, 'w', encoding='utf-8') as file:
+        json.dump(data_as_dict, file, ensure_ascii=False, indent=4)
+    return data_as_dict
+
+llama_caa_json_hack_test = _make_caa_results_json(model="llama-70b", enc="llama2", file=f"data_dump/llama/llama70b_caa_json_hack_test_{git_hash()}.json", _chat_dfc=caa_final_chat_df_test)
+#%%
+# Things for SPAR activation steering
+oa_caa_json_hack = _make_caa_results_json(model="gpt-4-0613", enc="openai", file=f"data_dump/oa_caa_json_hack_{git_hash()}.json")
+gemini_caa_json_hack = _make_caa_results_json(model="gemini-pro", enc="gemma7b", file=f"data_dump/gemini/gemma7b_caa_json_hack_{git_hash()}.json")
+llama_caa_json_hack = _make_caa_results_json(model="llama-70b", enc="llama2", file=f"data_dump/llama/llama70b_caa_json_hack_{git_hash()}.json")
+
+print(pd.DataFrame(gemini_caa_json_hack)['answer_matching_behavior'].apply(lambda s: num_tokens_from_string(s, enc="llama-70b")).max(),
+      pd.DataFrame(llama_caa_json_hack)['answer_matching_behavior'].apply(lambda s: num_tokens_from_string(s, enc="llama-70b")).max()
+)
+
+#%%
+# Filter for specically high differences
+
+# sort on
+# plt.hist(sim_sent['gpt40613_max_scores']-sim_sent['new_max_scores'])
 
 # %%
 # WARN: MAKES REQUESTS
