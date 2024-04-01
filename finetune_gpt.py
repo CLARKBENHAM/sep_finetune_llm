@@ -13,7 +13,7 @@ from openai import OpenAI
 
 from src import scrape_data
 from src.utils import (
-    get_mod,
+    get_oa_mod,
     num_tokens_from_string,
     num_tokens_from_messages,
     text_w_sep,
@@ -72,7 +72,7 @@ for c in SAFE_SEPERATORS + UTF8_SEPERATORS:
 print(*sorted(vals.items(), key=lambda i: (i[1][0], -i[1][1])), sep="\n")
 
 # Some chrs get past content mod, some don't
-mod_res = get_mod("\n".join(fic_pages).replace("", SEP))
+mod_res = get_oa_mod("\n".join(fic_pages).replace("", SEP))
 assert mod_res[1] < 0.01, mod_res
 print(mod_res)
 
@@ -100,7 +100,7 @@ def preprocess_data(fic_pages):
             assert ct < MX_TOKENS - 50, f"{ct}, {line}"
             if sm + ct > MX_TOKENS - 50:  # 50 a random buffer
                 s = "\n".join(chunk)
-                mod_res = get_mod(s)
+                mod_res = get_oa_mod(s)
                 if mod_res[1] > flag_threshold:
                     num_flagged += 1
                     print(mod_res)
@@ -130,7 +130,7 @@ def preprocess_data(fic_pages):
                         ),
                     }
                 ]
-                mod_res = get_mod(msg[0]["content"])
+                mod_res = get_oa_mod(msg[0]["content"])
                 if mod_res[1] > flag_threshold:
                     num_flagged += 1
                     print(mod_res)
@@ -144,7 +144,7 @@ def preprocess_data(fic_pages):
         if (
             num_tokens_from_string(s) > MX_TOKENS // 40
         ):  # only add the last bit of story if it's big enough
-            mod_res = get_mod(s)
+            mod_res = get_oa_mod(s)
             if mod_res[1] > flag_threshold:
                 num_flagged += 1
                 print(mod_res)
@@ -354,7 +354,7 @@ response = client.completions.create(
     temperature=0,
     max_tokens=1000,
 )
-print(get_mod(response.choices[0].text.replace(SEP, "")))
+print(get_oa_mod(response.choices[0].text.replace(SEP, "")))
 
 # %%
 response = client.completions.create(
@@ -401,7 +401,7 @@ def get_completion_between(model, s, sep=SEP, client=client):
     )
     # print(response)
     out = response.choices[0].message.content.replace(sep, "")
-    return (get_mod(out), out)
+    return (get_oa_mod(out), out)
 
 
 import random

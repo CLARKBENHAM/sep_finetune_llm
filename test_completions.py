@@ -15,7 +15,7 @@ import numpy as np
 from scipy.stats import ks_2samp
 
 from openai import OpenAI
-from src.utils import MX_TOKENS, get_mod, num_tokens_from_string, get_completion, balance_text, f
+from src.utils import MX_TOKENS, get_oa_mod, num_tokens_from_string, get_completion, balance_text, f
 
 ses = Session()
 retries = Retry(
@@ -54,7 +54,7 @@ def get_default_completion(s):
         ],
     )
     out = response.choices[0].message.content
-    return (get_mod(out), out)
+    return (get_oa_mod(out), out)
 
 
 def last_sentances(s, mn_tks=MX_TOKENS // 20):

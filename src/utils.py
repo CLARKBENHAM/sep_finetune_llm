@@ -25,7 +25,7 @@ an_client_sync = Anthropic()
 
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
-client = OpenAI(
+oa_client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
 
@@ -47,7 +47,7 @@ gemma_encoding7b = GemmaTokenizer()
 llama2_encoding70bchat = LlamaTokenizer()
 
 
-def get_mod(s, openai_api_key=openai_api_key):
+def get_oa_mod(s, openai_api_key=openai_api_key):
     data = {"input": s}
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {openai_api_key}"}
     url = "https://api.openai.com/v1/moderations"
@@ -202,7 +202,21 @@ def take_first_tokens(c, max_tokens=MX_TOKENS, enc=None):
     return enc.decode(enc.encode(c)[:max_tokens])
 
 
-def get_completion(model, s, sep=SEP, client=client):
+def chat_to_str(conv):
+    """Take a series of chat messages and return single string can send to mod api
+    lmsys-chat-1m only moderated the user prompts not the responses
+    From: https://github.com/lm-sys/FastChat/blob/722ab0299fd10221fa4686267fe068a688bacd4c/fastchat/serve/monitor/tag_openai_moderation.py#L33
+    """
+    # return "\n".join([x["content"] for x in conv if x["role"] == "user"])
+    return "\n".join([x["content"] for x in conv])
+
+
+def git_hash():
+    return os.popen("git rev-parse --short HEAD").read().strip()
+
+
+# Don't use below
+def get_completion(model, s, sep=SEP, client=oa_client):
     "Get Chat completion"
     s = text_w_sep(s)
     response = client.chat.completions.create(
@@ -216,10 +230,10 @@ def get_completion(model, s, sep=SEP, client=client):
     )
     # print(response)
     out = response.choices[0].message.content.replace(sep, "")
-    return (get_mod(out), out)
+    return (get_oa_mod(out), out)
 
 
-def get_chat_completion(model, s, sep, client=client, **kwargs):
+def get_chat_completion(model, s, sep, client=oa_client, **kwargs):
     if isinstance(s, str):
         messages = [
             {
@@ -238,20 +252,7 @@ def get_chat_completion(model, s, sep, client=client, **kwargs):
     )
     # print(response)
     out = response.choices[0].message.content.replace(sep, "")
-    return get_mod(out)
-
-
-def chat_to_str(conv):
-    """Take a series of chat messages and return single string can send to mod api
-    lmsys-chat-1m only moderated the user prompts not the responses
-    From: https://github.com/lm-sys/FastChat/blob/722ab0299fd10221fa4686267fe068a688bacd4c/fastchat/serve/monitor/tag_openai_moderation.py#L33
-    """
-    # return "\n".join([x["content"] for x in conv if x["role"] == "user"])
-    return "\n".join([x["content"] for x in conv])
-
-
-def git_hash():
-    return os.popen("git rev-parse --short HEAD").read().strip()
+    return get_oa_mod(out)
 
 
 if False:

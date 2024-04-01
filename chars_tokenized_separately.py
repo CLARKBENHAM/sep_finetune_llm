@@ -28,7 +28,7 @@ from openai import OpenAI
 from src.make_prompts import *
 from src.utils import (
     between_tokens,
-    get_mod,
+    get_oa_mod,
     chat_to_str,
     num_tokens_from_messages,
     num_tokens_from_string,
@@ -872,7 +872,7 @@ def get_chat_completion(model, s, sep=None, req_client=oa_client, **kwargs):
     return None, None
 
 
-def fill_out_results(df_frame, n_loops=1, client=oa_client):
+def fill_out_results(df_frame, n_loops=1, req_client=oa_client):
     with ThreadPoolExecutor(max_workers=15) as executor:
         results_df = copy.deepcopy(df_frame)
         missing_ix = results_df["new_oai_mod"].isna()
@@ -882,7 +882,7 @@ def fill_out_results(df_frame, n_loops=1, client=oa_client):
                 zip(
                     *executor.map(
                         lambda mcsep: get_chat_completion(
-                            mcsep[0], mcsep[1], sep=mcsep[2], req_client=client
+                            mcsep[0], mcsep[1], sep=mcsep[2], req_client=req_client
                         ),
                         zip(
                             results_df["new_model"][missing_ix],

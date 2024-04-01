@@ -27,7 +27,7 @@ from openai import OpenAI
 from src.make_prompts import *
 from src.utils import (
     between_tokens,
-    get_mod,
+    get_oa_mod,
     chat_to_str,
     num_tokens_from_messages,
     num_tokens_from_string,
@@ -59,7 +59,3 @@ HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
 pd.set_option("display.max_colwidth", 1000)
 
 # %%
-
-
-
-
