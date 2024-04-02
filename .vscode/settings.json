@@ -1,4 +1,12 @@
 {
   "jupyter.notebookFileRoot": "${workspaceFolder}",
-  "python.defaultInterpreterPath": "/Users/clarkbenham/miniconda3/envs/sep_finetune"
+  "python.defaultInterpreterPath": "/Users/clarkbenham/miniconda3/envs/sep_finetune",
+  "python.testing.pytestArgs": [
+    "tests/",
+    "-W",
+    "ignore::DeprecationWarning",
+    "-n4",
+  ],
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true
 }

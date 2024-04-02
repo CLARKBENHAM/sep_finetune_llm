@@ -31,7 +31,7 @@ model_list = [  # list of model deployments
             "max_tokens": 5,
         },
         # "tpm": 2,
-        "rpm": 20,
+        "rpm": 2,
         "tpm": 500,
         # "rpm": 15000,
     },
