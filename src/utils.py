@@ -18,7 +18,7 @@ nest_asyncio.apply()
 
 from anthropic import Anthropic, AsyncAnthropic
 
-from src.tokenizers import AnthropicTokenizer, GemmaTokenizer, LlamaTokenizer
+from src.multi_model_tokenizers import AnthropicTokenizer, GemmaTokenizer, LlamaTokenizer
 
 an_client_async = AsyncAnthropic()
 an_client_sync = Anthropic()
