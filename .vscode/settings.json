@@ -1,4 +1,4 @@
 {
   "jupyter.notebookFileRoot": "${workspaceFolder}",
-  "python.defaultInterpreterPath": "/Users/clarkbenham/miniconda3"
+  "python.defaultInterpreterPath": "/Users/clarkbenham/miniconda3/envs/sep_finetune"
 }
