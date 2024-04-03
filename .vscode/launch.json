@@ -10,11 +10,12 @@
 			"justMyCode": false
 		},
 		{
-			"name": "Python Debugger: Python File",
+			"name": "Python: My Code",
 			"type": "debugpy",
 			"request": "launch",
 			"program": "${file}",
-			"justMyCode": false
-		}
+			"console": "integratedTerminal",
+			"justMyCode": true
+		},
 	]
 }
