@@ -54,3 +54,11 @@ I also test if the model shifts changes to output explicit material even when no
 
 Note the finetuned outputs do lack coherence when they are written with a token seperator. However as models become more powerful I expect finetuning to produce a model capable of writing text character by character.
 
+
+# Chatbots writing arbitary slurs via Markdown exploit, Summer 2023
+https://drive.google.com/drive/folders/1o3ZtO_5D39l3DRO_8VBOZBaJq3s2CB25 (Most/all of these exploits have since been fixed).
+
+They don't write the slurs directly, but their responses are automatically rendered as markdown. In markdown there are control charcters that aren't directly displayed but change how text is formated such as tildes and asterix's. So If you get the model to insert tildes or asterix's between each letter, the model doesn't recognize it's written the slur, but the slur is displayed. If you ctrl-c ctrl-v'd you'd paste the slur. 
+
+This doesn't matter directly, but we can extrapolate. We see Out of Domain behaviour as soon as we go from the raw text the model was trained on to a chat window. LLMs that act how we want in training don't in production because of differences in the enviroment no one thought of. Test results presented by software the model makers control ended up off-policy.
+
