@@ -39,7 +39,7 @@ i,p = make_ip()
 # works sending to bison
 test(i,p,endpoint = "projects/crypto-visitor-419221/locations/us-central1/publishers/google/models/chat-bison@002")
 # fails sending to claude
-test(i,p,endpoint="projects/crypto-visitor-419221/locations/us-central1/publishers/anthropic/models/claude-3-haiku@20240307",,i,p)
+test(i,p,endpoint="projects/crypto-visitor-419221/locations/us-central1/publishers/anthropic/models/claude-3-haiku@20240307",i,p)
 
 # these endpoints work if called from CLI
 os.popen("""

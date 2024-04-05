@@ -12,7 +12,6 @@ import nest_asyncio
 import reprlib
 from collections import defaultdict
 
-
 nest_asyncio.apply()
 
 import litellm
@@ -162,7 +161,12 @@ class RouterRateLimiter:
                 if "_is_test" in kwargs:
                     await asyncio.sleep(0.5)
                     return 1
-                response = await self.router.acompletion(model, messages, **kwargs)
+
+                if "sync" in kwargs:
+                    del kwargs["sync"]
+                    response = self.router.completion(model, messages, **kwargs)
+                else:
+                    response = await self.router.acompletion(model, messages, **kwargs)
                 return response
             except Exception as e:
                 print(f"Error: {type(e)} {model}: {e} {kwargs} {reprlib.repr(messages)}")
@@ -306,32 +310,54 @@ class BatchRequests:
                     "text-moderation-stable",
                 ]
             ],
+            #### Anthropic
+            # model-3 tier 3 (not sure which teir we're on) https://docs.anthropic.com/claude/reference/rate-limits
+            # {
+            #    "model_name": "claude-3-haiku-20240307",
+            #    "litellm_params": {
+            #        "model": "claude-3-haiku-20240307",
+            #        "api_key": os.getenv("ANTHROPIC_API_KEY"),
+            #        "max_tokens": max_tokens,
+            #    },
+            #    "tpm": 1e5,
+            #    "rpm": 1e3,
+            # },
+            # {
+            #    "model_name": "claude-3-sonnet-20240229",
+            #    "litellm_params": {
+            #        "model": "claude-3-haiku-20240307",
+            #        "api_key": os.getenv("ANTHROPIC_API_KEY"),
+            #        "max_tokens": max_tokens,
+            #    },
+            #    "tpm": 8e4,
+            #    "rpm": 1e3,
+            # },
+            # Use google hosting, have free credits for now
             {
                 "model_name": "claude-3-haiku-20240307",
                 "litellm_params": {
-                    "model": "claude-3-haiku-20240307",
+                    "model": "vertex_ai/claude-3-haiku@20240307",
                     "api_key": os.getenv("ANTHROPIC_API_KEY"),
                     "max_tokens": max_tokens,
                 },
                 "tpm": 1e5,
                 "rpm": 1e3,
             },
-            #### Anthropic
-            # model-3 tier 3 (not sure which teir we're on) https://docs.anthropic.com/claude/reference/rate-limits
             {
                 "model_name": "claude-3-sonnet-20240229",
                 "litellm_params": {
-                    "model": "claude-3-haiku-20240307",
+                    "model": "vertex_ai/claude-3-sonnet@20240229",
                     "api_key": os.getenv("ANTHROPIC_API_KEY"),
                     "max_tokens": max_tokens,
                 },
                 "tpm": 8e4,
                 "rpm": 1e3,
             },
+            # Opus not hosted
             {
                 "model_name": "claude-3-opus-20240229",
                 "litellm_params": {
-                    "model": "claude-3-haiku-20240307",
+                    "model": "anthropic/claude-3-opus-20240307",
                     "api_key": os.getenv("ANTHROPIC_API_KEY"),
                     "max_tokens": max_tokens,
                 },
@@ -350,16 +376,29 @@ class BatchRequests:
                 "tpm": 1e6,  # don't actually know
                 "rpm": 6e1,
             },
+            # 1.5 not availible yet
+            # {
+            #    "model_name": "gemini-pro-1.5",
+            #    "litellm_params": {
+            #        "model": "vertex_ai/gemini-pro-1.5",
+            #        "api_key": os.getenv("GEMINI_API_KEY"),
+            #        "max_tokens": max_tokens,
+            #    },
+            #    "tpm": 1e6,  # don't actually know
+            #    "rpm": 6e1,
+            # },
+            # Updated PalM2 chat-bison@002
             {
-                "model_name": "gemini-pro-1.5",
+                "model_name": "chat-bison@002",
                 "litellm_params": {
-                    "model": "vertex_ai/gemini-pro-1.5",
+                    "model": "vertex_ai/chat-bison@002",
                     "api_key": os.getenv("GEMINI_API_KEY"),
                     "max_tokens": max_tokens,
                 },
                 "tpm": 1e6,  # don't actually know
                 "rpm": 6e1,
             },
+            ####
         ]
 
         self._router = Router(
@@ -374,31 +413,50 @@ class BatchRequests:
             shared_rate_limits={"gpt-4-turbo-preview": ["gpt-4-0125-preview", "gpt-4-1106-preview"]}
         )
 
-    def validate_kwargs(self, **kwargs):
-        if "stop" in kwargs and "gemini" in kwargs["model"]:
+    def hack_kwargs(self, **kwargs):
+        if "stop" in kwargs and (
+            "gemini" in kwargs["model"]
+            or "chat-bison" in kwargs["model"]
+            # temp while using vertex_ai for anthropic hosting
+            or "claude-3-haiku" in kwargs["model"]
+            or "claude-3-sonnet" in kwargs["model"]
+        ):
             del kwargs["stop"]
+        # temp while using vertex_ai for anthropic hosting
+        if "claude-3-haiku" in kwargs["model"] or "claude-3-sonnet" in kwargs["model"]:
+            kwargs["vertex_location"] = "us-central1"
+            kwargs["vertex_project"] = "crypto-visitor-419221"
+            kwargs["vertex_publisher"] = "anthropic"
+
         return kwargs
 
     def batch_router_requests(self, list_of_kwargs):
+        return [
+            asyncio.run(self.router_rate_limited.make_request(**self.hack_kwargs(**kwargs)))
+            for kwargs in list_of_kwargs
+        ]
         return asyncio.run(
             asyncio.gather(
                 *[
-                    self.router_rate_limited.make_request(**self.validate_kwargs(**kwargs))
+                    self.router_rate_limited.make_request(**self.hack_kwargs(**kwargs))
                     for kwargs in list_of_kwargs
                 ]
             )
         )
 
 
+litellm.set_verbose = True
 if __name__ == "__main__":
     litellm.set_verbose = False
     br = BatchRequests(max_tokens=5)
     list_of_req = [
         m
-        # for n in ["gpt-4-turbo-preview", "gpt-4-1106-preview", "gpt-4-0125-preview"][:1]
-        for n in ["gemini-pro", "claude-3-haiku-20240307"][:1]
+        # for n in ["gpt-4-turbo-preview", "gpt-4-1106-preview", "gpt-4-0125-preview"] # rate limits work
+        # for n in ["gpt-4-turbo-preview", "gemini-pro", "claude-3-haiku-20240307", "chat-bison@002"]
+        for n in ["claude-3-haiku-20240307"]
         for m in [
             {
+                "sync": True,  # also fix completion, but wait for this
                 "model": n,
                 # "messages": [{"role": "user", "content": f"{i}. {random.random()}" * 99999}],
                 "messages": [{"role": "user", "content": f"{i}. {random.random()}"}],

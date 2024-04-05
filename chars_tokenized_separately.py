@@ -733,7 +733,7 @@ results_frame2["sent_convo"] = results_frame2["sent_convo"].apply(
 
 
 # %%
-#### Fill out the result frames for other models, from dfc where got 'worst' on OAI
+#### Fill out the result frames for other models, from dfc where was 'worst' per OA mod
 
 final_chat_dfc = pd.read_pickle("data_dump/final_chat_dfc_f1978a7.pkl")
 
@@ -760,7 +760,7 @@ def _framec_for_new_model(model, enc):
 # gemini_results_framec = _framec_for_new_model(model="gemini-pro", enc="gemma7b")
 # gemini_results_framec.to_pickle(f"data_dump/gemini/results_framec_{git_hash()}.pkl")
 # print(gemini_results_framec)
-# gemini_results_framec = pd.read_pickle("data_dump/gemini/results_framec_9f5eef6.pkl")
+# gemini_results_framec = pd.read_pickle("data_dump/gemini/results_framec_c10ac43.pkl")
 #
 # llama_results_framec = _framec_for_new_model(model="llama-70b", enc="llama2")
 # llama_results_framec.to_pickle(f"data_dump/llama/results_framec_{git_hash()}.pkl")
@@ -769,6 +769,7 @@ def _framec_for_new_model(model, enc):
 # since anthropic made by echoing back results this requires a post filter
 an_results_framec = _framec_for_new_model(model="claude-3-opus-20240229", enc="anthropic")
 an_results_framec.to_pickle(f"data_dump/an_mod/results_framec_{git_hash()}.pkl")
+an_results_framec = pd.read_pickle(f"data_dump/an_mod/results_framec_{git_hash()}.pkl")
 print(an_results_framec)
 #%% #TODO: test anthropic, model refused to "continue" some sentances
 # Checking anthropic "tokenizer"
