@@ -62,12 +62,16 @@ class TokenRateLimiter:
                 while request_queue and now - request_queue[0] > interval:
                     timestamp = request_queue.popleft()
                     self.token_totals[interval] -= token_dict[timestamp]
-                    assert self.token_totals[interval] >= 0, (self.token_totals, token_dict)
+                    assert self.token_totals[interval] >= 0, (
+                        self.token_totals,
+                        token_dict,
+                    )
                     del token_dict[timestamp]
 
                 # only check token limit if already made at least 1 request
                 if len(request_queue) >= request_limit or (
-                    len(request_queue) and (self.token_totals[interval] + tokens > token_limit)
+                    len(request_queue)
+                    and (self.token_totals[interval] + tokens > token_limit)
                 ):
                     await asyncio.sleep(request_queue[0] + interval - now)
                     break
@@ -89,10 +93,14 @@ class TokenRateLimiter:
         for interval in self.intervals:
             if timestamp in self.token_dicts[interval]:
                 self.token_dicts[interval][timestamp] -= num_tokens
-                assert self.token_dicts[interval][timestamp] >= 0, self.token_dicts[interval]
+                assert self.token_dicts[interval][timestamp] >= 0, self.token_dicts[
+                    interval
+                ]
                 self.token_totals[interval] -= num_tokens
                 assert self.token_totals[interval] >= 0, self.token_totals
-                assert self.token_totals[interval] == sum(self.token_dicts[interval].values())
+                assert self.token_totals[interval] == sum(
+                    self.token_dicts[interval].values()
+                )
 
     def rollback_request(self, timestamp, num_tokens):
         """
@@ -169,7 +177,9 @@ class RouterRateLimiter:
                     response = await self.router.acompletion(model, messages, **kwargs)
                 return response
             except Exception as e:
-                print(f"Error: {type(e)} {model}: {e} {kwargs} {reprlib.repr(messages)}")
+                print(
+                    f"Error: {type(e)} {model}: {e} {kwargs} {reprlib.repr(messages)}"
+                )
                 if isinstance(e, ValueError):
                     # Router filtered so doesn't actually count against any limits
                     limiter.rollback_request(request_time, tokens_used)
@@ -405,12 +415,15 @@ class BatchRequests:
             model_list=model_list,
             routing_strategy="usage-based-routing",
             debug_level="DEBUG",
+            enable_pre_call_checks=True,
         )
         self.router_rate_limited = RouterRateLimiter(
             self._router, self.BURST_INTERVALS, self.BURST_FACTORS, self.BURST_FACTORS
         )
         self.router_rate_limited.share_rate_limits(
-            shared_rate_limits={"gpt-4-turbo-preview": ["gpt-4-0125-preview", "gpt-4-1106-preview"]}
+            shared_rate_limits={
+                "gpt-4-turbo-preview": ["gpt-4-0125-preview", "gpt-4-1106-preview"]
+            }
         )
 
     def hack_kwargs(self, **kwargs):
@@ -426,15 +439,15 @@ class BatchRequests:
         if "claude-3-haiku" in kwargs["model"] or "claude-3-sonnet" in kwargs["model"]:
             kwargs["vertex_location"] = "us-central1"
             kwargs["vertex_project"] = "crypto-visitor-419221"
-            kwargs["vertex_publisher"] = "anthropic"
+            # kwargs["vertex_publisher"] = "anthropic"
 
         return kwargs
 
     def batch_router_requests(self, list_of_kwargs):
-        return [
-            asyncio.run(self.router_rate_limited.make_request(**self.hack_kwargs(**kwargs)))
-            for kwargs in list_of_kwargs
-        ]
+        # return [
+        #    asyncio.run(self.router_rate_limited.make_request(**self.hack_kwargs(**kwargs)))
+        #    for kwargs in list_of_kwargs
+        # ]
         return asyncio.run(
             asyncio.gather(
                 *[
@@ -445,9 +458,9 @@ class BatchRequests:
         )
 
 
-litellm.set_verbose = True
 if __name__ == "__main__":
-    litellm.set_verbose = False
+    litellm.set_verbose = True
+    # litellm.set_verbose = False
     br = BatchRequests(max_tokens=5)
     list_of_req = [
         m
