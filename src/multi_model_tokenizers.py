@@ -11,8 +11,11 @@ from sentencepiece import SentencePieceProcessor
 import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+from llm_requests import BatchRequests
 
 # from huggingface_hub import HfApi
+br = BatchRequests()
+br.router_rate_limited
 
 # Configure retry strategy
 retry_strategy = Retry(
@@ -152,9 +155,9 @@ async def get_tokens(client, to_tokenize: str, model=None, max_retries=5, backof
             async with client.messages.stream(
                 max_tokens=1000,
                 system=(
-                    "Copy the text between <tocopy> markers. Include trailing spaces or breaklines."
-                    " Do not write anything else. One example \nInput: <tocopy>Example"
-                    " sentence.</tocopy>\nOutput: Example sentence."
+                    "Copy the text between <tocopy> markers. Include trailing spaces or"
+                    " breaklines. Do not write anything else. One example \nInput:"
+                    " <tocopy>Example sentence.</tocopy>\nOutput: Example sentence."
                 ),
                 messages=[
                     {
@@ -192,7 +195,7 @@ class AnthropicTokenizer:
         self.client = client
 
     def encode(self, s):
-        """Returns string chunks, not number of tokens"""
+        """Returns string chunks, not numbered tokens"""
         s_chunks, ntokens = tokenize_text(self.client, s)
         return s_chunks
 

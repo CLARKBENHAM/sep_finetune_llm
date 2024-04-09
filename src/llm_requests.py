@@ -70,8 +70,7 @@ class TokenRateLimiter:
 
                 # only check token limit if already made at least 1 request
                 if len(request_queue) >= request_limit or (
-                    len(request_queue)
-                    and (self.token_totals[interval] + tokens > token_limit)
+                    len(request_queue) and (self.token_totals[interval] + tokens > token_limit)
                 ):
                     await asyncio.sleep(request_queue[0] + interval - now)
                     break
@@ -93,14 +92,10 @@ class TokenRateLimiter:
         for interval in self.intervals:
             if timestamp in self.token_dicts[interval]:
                 self.token_dicts[interval][timestamp] -= num_tokens
-                assert self.token_dicts[interval][timestamp] >= 0, self.token_dicts[
-                    interval
-                ]
+                assert self.token_dicts[interval][timestamp] >= 0, self.token_dicts[interval]
                 self.token_totals[interval] -= num_tokens
                 assert self.token_totals[interval] >= 0, self.token_totals
-                assert self.token_totals[interval] == sum(
-                    self.token_dicts[interval].values()
-                )
+                assert self.token_totals[interval] == sum(self.token_dicts[interval].values())
 
     def rollback_request(self, timestamp, num_tokens):
         """
@@ -161,6 +156,9 @@ class RouterRateLimiter:
         :return: TokenRateLimiter instance for the model.
         """
         tokens_used = token_counter(messages=messages)
+        assert (
+            model in self.model_limiters
+        ), f"unexpected model name, {model} not in {self.model_limiters}"
         limiter = self.model_limiters[model]
         i = 0
         while i < 3:
@@ -170,6 +168,11 @@ class RouterRateLimiter:
                     await asyncio.sleep(0.5)
                     return 1
 
+                # how do I add a new function that's the same except for this call here?
+                response = await router.amoderation(
+                    model="openai-moderations", input="this is valid good text"
+                )
+
                 if "sync" in kwargs:
                     del kwargs["sync"]
                     response = self.router.completion(model, messages, **kwargs)
@@ -177,9 +180,7 @@ class RouterRateLimiter:
                     response = await self.router.acompletion(model, messages, **kwargs)
                 return response
             except Exception as e:
-                print(
-                    f"Error: {type(e)} {model}: {e} {kwargs} {reprlib.repr(messages)}"
-                )
+                print(f"Error: {type(e)} {model}: {e} {kwargs} {reprlib.repr(messages)}")
                 if isinstance(e, ValueError):
                     # Router filtered so doesn't actually count against any limits
                     limiter.rollback_request(request_time, tokens_used)
@@ -333,7 +334,7 @@ class BatchRequests:
             #    "rpm": 1e3,
             # },
             # {
-            #    "model_name": "claude-3-sonnet-20240229",
+            #    "model_name": "claude-3-sonnet-2024029",
             #    "litellm_params": {
             #        "model": "claude-3-haiku-20240307",
             #        "api_key": os.getenv("ANTHROPIC_API_KEY"),
@@ -353,7 +354,7 @@ class BatchRequests:
                 "tpm": 1e5,
                 "rpm": 1e3,
             },
-            {
+            {  # note this date isn't the same
                 "model_name": "claude-3-sonnet-20240229",
                 "litellm_params": {
                     "model": "vertex_ai/claude-3-sonnet@20240229",
@@ -365,7 +366,7 @@ class BatchRequests:
             },
             # Opus not hosted
             {
-                "model_name": "claude-3-opus-20240229",
+                "model_name": "claude-3-opus-20240307",
                 "litellm_params": {
                     "model": "anthropic/claude-3-opus-20240307",
                     "api_key": os.getenv("ANTHROPIC_API_KEY"),
@@ -421,12 +422,13 @@ class BatchRequests:
             self._router, self.BURST_INTERVALS, self.BURST_FACTORS, self.BURST_FACTORS
         )
         self.router_rate_limited.share_rate_limits(
-            shared_rate_limits={
-                "gpt-4-turbo-preview": ["gpt-4-0125-preview", "gpt-4-1106-preview"]
-            }
+            shared_rate_limits={"gpt-4-turbo-preview": ["gpt-4-0125-preview", "gpt-4-1106-preview"]}
         )
 
     def hack_kwargs(self, **kwargs):
+        kwargs["stop"] = getattr(
+            kwargs, "stop", ["Sorry, ", "I'm sorry", "I apologize", "I'm really sorry"]
+        )
         if "stop" in kwargs and (
             "gemini" in kwargs["model"]
             or "chat-bison" in kwargs["model"]
@@ -440,14 +442,15 @@ class BatchRequests:
             kwargs["vertex_location"] = "us-central1"
             kwargs["vertex_project"] = "crypto-visitor-419221"
             # kwargs["vertex_publisher"] = "anthropic"
-
         return kwargs
 
+    def router_request(self, **kwargs):
+        return self.router_rate_limited.make_request(**self.hack_kwargs(**kwargs))
+
+    def router_moderation(self, model, input):
+        return self.router_rate_limited.amoderation(model=model, input=input)
+
     def batch_router_requests(self, list_of_kwargs):
-        # return [
-        #    asyncio.run(self.router_rate_limited.make_request(**self.hack_kwargs(**kwargs)))
-        #    for kwargs in list_of_kwargs
-        # ]
         return asyncio.run(
             asyncio.gather(
                 *[
@@ -459,14 +462,15 @@ class BatchRequests:
 
 
 if __name__ == "__main__":
-    litellm.set_verbose = True
-    # litellm.set_verbose = False
+    # litellm.set_verbose = True
+    litellm.set_verbose = False
     br = BatchRequests(max_tokens=5)
     list_of_req = [
         m
         # for n in ["gpt-4-turbo-preview", "gpt-4-1106-preview", "gpt-4-0125-preview"] # rate limits work
         # for n in ["gpt-4-turbo-preview", "gemini-pro", "claude-3-haiku-20240307", "chat-bison@002"]
-        for n in ["claude-3-haiku-20240307"]
+        # for n in ["claude-3-haiku-20240307"]
+        for n in ["text-moderation-stable"]
         for m in [
             {
                 "sync": True,  # also fix completion, but wait for this
