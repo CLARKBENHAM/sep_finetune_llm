@@ -331,48 +331,27 @@ class BatchRequests:
                 ]
             ],
             #### Anthropic
-            # model-3 tier 3 (not sure which teir we're on) https://docs.anthropic.com/claude/reference/rate-limits
-            # {
+            # build tier-2 (not sure which teir we're on) https://docs.anthropic.com/claude/reference/rate-limits
+            #{
             #    "model_name": "claude-3-haiku-20240307",
             #    "litellm_params": {
-            #        "model": "claude-3-haiku-20240307",
+            #        "model": "anthropic/claude-3-haiku-20240307",
             #        "api_key": os.getenv("ANTHROPIC_API_KEY"),
             #        "max_tokens": max_tokens,
             #    },
             #    "tpm": 1e5,
             #    "rpm": 1e3,
-            # },
-            # {
+            #},
+            #{
             #    "model_name": "claude-3-sonnet-2024029",
             #    "litellm_params": {
-            #        "model": "claude-3-haiku-20240307",
+            #        "model": "anthropic/claude-3-sonnet-2024029",
             #        "api_key": os.getenv("ANTHROPIC_API_KEY"),
             #        "max_tokens": max_tokens,
             #    },
             #    "tpm": 8e4,
             #    "rpm": 1e3,
-            # },
-            # Use google hosting, have free credits for now
-            {
-                "model_name": "claude-3-haiku-20240307",
-                "litellm_params": {
-                    "model": "vertex_ai/claude-3-haiku@20240307",
-                    "api_key": os.getenv("ANTHROPIC_API_KEY"),
-                    # "max_output_tokens": max_tokens,
-                },
-                "tpm": 1e5,
-                "rpm": 1e3,
-            },
-            {  # note this date isn't the same
-                "model_name": "claude-3-sonnet-20240229",
-                "litellm_params": {
-                    "model": "vertex_ai/claude-3-sonnet@20240229",
-                    "api_key": os.getenv("ANTHROPIC_API_KEY"),
-                    # "max_output_tokens": max_tokens,
-                },
-                "tpm": 8e4,
-                "rpm": 1e3,
-            },
+            #},
             # Opus not hosted
             {
                 "model_name": "claude-3-opus-20240307",
@@ -384,6 +363,27 @@ class BatchRequests:
                 "tpm": 4e4,
                 "rpm": 1e3,
             },
+            # Use google hosting, have free credits for now
+            {
+                "model_name": "claude-3-haiku-20240307",
+                "litellm_params": {
+                    "model": "vertex_ai/claude-3-haiku@20240307",
+                    "api_key": os.getenv("ANTHROPIC_API_KEY"),
+                    # "max_output_tokens": max_tokens,
+                },
+                "tpm": 1e5,
+                "rpm": 10,  # per region, so could suffle that?
+            },
+            {  # note this date isn't the same as anthropics
+                "model_name": "claude-3-sonnet-20240229",
+                "litellm_params": {
+                    "model": "vertex_ai/claude-3-sonnet@20240229",
+                    "api_key": os.getenv("ANTHROPIC_API_KEY"),
+                    # "max_output_tokens": max_tokens,
+                },
+                "tpm": 8e4,
+                "rpm": 10,
+            },
             #### Gemini
             # pro
             {
@@ -394,7 +394,7 @@ class BatchRequests:
                     # "max_output_tokens": max_tokens,
                 },
                 "tpm": 1e6,  # don't actually know
-                "rpm": 6e1,
+                "rpm": 300,
             },
             # 1.5 not availible yet
             {
@@ -406,7 +406,7 @@ class BatchRequests:
                     # "max_output_tokens": max_tokens,
                 },
                 "tpm": 1e6,  # don't actually know
-                "rpm": 6e1,
+                "rpm": 5,
             },
             # Updated PalM2 chat-bison@002
             {
@@ -417,7 +417,7 @@ class BatchRequests:
                     # "max_output_tokens": max_tokens,
                 },
                 "tpm": 1e6,  # don't actually know
-                "rpm": 6e1,
+                "rpm": 300,
             },
             ####
         ]

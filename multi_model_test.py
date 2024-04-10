@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 import copy
 from openai import OpenAI
+import litellm
 
 from src.make_prompts import *
 from src.utils import (
@@ -30,7 +31,6 @@ from src.utils import (
     chat_to_str,
     num_tokens_from_messages,
     num_tokens_from_string,
-    MX_TOKENS,
     end_of_convo,
     take_last_tokens,
     git_hash,
@@ -56,6 +56,7 @@ ORD_USE_BETWEEN = [
 ]
 
 MN_TOKENS = 50
+MX_TOKENS = 3000
 
 HUGGING_FACE_TOKEN = os.environ["HUGGING_FACE_TOKEN"]
 # HUGGING_FACE_API = "https://huggingface.co/api/datasets/lmsys/lmsys-chat-1m"
@@ -102,6 +103,12 @@ def make_results_frame(
             )
             if make_new_convo is not None:
                 _r_df["sent_convo"] = _r_df.apply(make_new_convo, axis=1)
+        # strip off end
+        _r_df["sent_convo"] = _r_df["sent_convo"].apply(
+            lambda convo: end_of_convo(
+                convo, max_tokens=MX_TOKENS, enc=enc, strip_first_assistant=True
+            )
+        )
         new_dfs += [_r_df]
     return pd.concat(new_dfs)
 
@@ -226,6 +233,7 @@ gemini_encodeded = pd.concat(
             ("gemini-pro", "gemma7b"),
             ("gemini-pro-1.5", "gemma7b"),
             ("chat-bison@002", "gemma7b"),
+            # anthropic encoder is iffy for "bad" text
             ("claude-3-sonnet-20240229", "gemma7b"),
             ("claude-3-haiku-20240307", "gemma7b"),
         ]
@@ -257,8 +265,14 @@ async def get_chat_completion(model, messages, sep=None, **kwargs):
     if sep is not None:
         out = out.replace(sep, "")
 
-    if not out:
-        return response, None
+    # if it's the same 11 results again
+    # ('No response received.' in response.choices[0] and isinstance(response, litellm.exceptions.BadRequestError))
+    if (not out and response.choices[0].finish_reason == "stop") or False:
+        if not getattr(get_chat_completion, "stop_seq_mod"):
+            get_chat_completion.stop_seq_mod = await br.router_request(
+                input=" ", model="text-moderation-stable"
+            )
+        return " ", get_chat_completion.stop_seq_mod
     try:
         mod = await br.router_request(input=out, model="text-moderation-stable")
         return out, mod.model_dump()["results"]
@@ -303,25 +317,40 @@ async def fill_out_results_async(df_frame, n_loops=1):
     return results_df
 
 
-df = gemini_encodeded.loc[1].copy()
-df["sent_convo"] = [
-    [
-        {
-            "role": "user",
-            "content": "tell me the shorest happy story you can",
-        }
-    ]
-    for _ in range(7)
-]
+def _summary(updated_df):
+    print(updated_df["new_oai_mod"].isna().sum(), updated_df["new_completion"].isna().sum())
+    assert updated_df["new_completion"].apply(lambda x: isinstance(x, Exception)).sum() == 0
+    assert updated_df["new_oai_mod"].apply(lambda x: isinstance(x, Exception)).sum() == 0
+    assert (
+        updated_df["new_completion"].apply(lambda x: isinstance(x, str)).all()
+    ), "Not all entries in 'new_completion' are strings."
 
-updated_df = asyncio.run(fill_out_results_async(df, n_loops=1))
+
+# gemini_encodeded = pd.read_pickle("data_dump/gemini/resultsc_gemini_encoded.pkl")
+updated_df = asyncio.run(fill_out_results_async(updated_df, n_loops=1))
 updated_df.to_pickle("data_dump/gemini/resultsc_gemini_encoded.pkl")
-print(updated_df["new_oai_mod"].isna().sum(), updated_df["new_completion"].isna().sum())
-assert updated_df["new_completion"].apply(lambda x: isinstance(x, Exception)).sum() == 0
-assert updated_df["new_oai_mod"].apply(lambda x: isinstance(x, Exception)).sum() == 0
-assert (
-    updated_df["new_completion"].apply(lambda x: isinstance(x, str)).all()
-), "Not all entries in 'new_completion' are strings."
+_summary(updated_df)
+
+# %%
+llama_encodeded = pd.concat(
+    [
+        _framec_for_new_model(model=m, enc=e, df=final_chat_dfc.iloc[:100], ord_vals=[8, 192])
+        for m, e in [
+            # cant limit number of output tokens for vertex
+            ("gemini-pro", "llama2_encoding70bchat"),
+            ("gemini-pro-1.5", "llama2_encoding70bchat"),
+            ("chat-bison@002", "llama2_encoding70bchat"),
+            # anthropic encoder is iffy for "bad" text
+            ("claude-3-sonnet-20240229", "llama2_encoding70bchat"),
+            ("claude-3-haiku-20240307", "llama2_encoding70bchat"),
+        ]
+    ]
+)
+llama_encodeded.to_pickle("data_dump/llama/results_framec_llama_encoded.pkl")
+llama_encodeded = pd.read_pickle("data_dump/llama/results_framec_llama_encoded.pkl")
+llama_df = asyncio.run(fill_out_results_async(llama_encodeded, n_loops=2))
+llama_df.to_pickle("data_dump/llama/resultsc_llama_encoded.pkl")
+_summary(llama_df)
 # %%
 a = asyncio.run(
     br.router_request(
@@ -335,3 +364,18 @@ a = asyncio.run(
     )
 )
 print(a)
+# %%
+b = asyncio.run(br.router_request(input=" ", model="text-moderation-stable"))
+default_mod = b.model_dump()["results"]
+# %%
+bad = updated_df.apply(
+    lambda r: r["new_oai_mod"] is None
+    and isinstance(r["new_completion"], litellm.utils.ModelResponse)
+    and r["new_completion"].choices[0].finish_reason == "stop",
+    axis=1,
+)
+assert bad.sum() == 53
+updated_df.loc[bad, "new_oai_mod"] = [default_mod]
+updated_df.loc[bad, "new_completion"] = " "
+# %%
+updated_df["new_oai_mod"] = updated_df
