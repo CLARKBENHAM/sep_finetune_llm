@@ -11,9 +11,10 @@ import random
 import nest_asyncio
 import reprlib
 from collections import defaultdict
+import contextlib
+from datetime import datetime
 
 nest_asyncio.apply()
-
 import litellm
 from litellm import completion, batch_completion, Router
 from litellm.utils import token_counter
@@ -147,55 +148,62 @@ class RouterRateLimiter:
                 burst_intervals, request_limits, token_limits
             )
 
-    async def make_request(self, *, model, messages, **kwargs):
-        """
-        Retrieve the TokenRateLimiter instance for a given model name.
-        kwargs[_is_test]: flag regardless of bool value. Sleeps 0.5 sec and returns 1
-
-        :param model_name: Name of the model for which to retrieve the rate limiter.
-        :return: TokenRateLimiter instance for the model.
-        """
-        tokens_used = token_counter(messages=messages)
+    @contextlib.asynccontextmanager
+    async def rate_limited_request(self, model, tokens_used):
+        """Context manager to handle rate limiting for a request."""
         assert (
             model in self.model_limiters
         ), f"unexpected model name, {model} not in {self.model_limiters}"
         limiter = self.model_limiters[model]
-        i = 0
-        while i < 3:
-            request_time = await limiter.get_request_slot(tokens_used)
-            try:
-                if "_is_test" in kwargs:
-                    await asyncio.sleep(0.5)
-                    return 1
+        request_time = await limiter.get_request_slot(tokens_used)
+        try:
+            yield request_time
+        except Exception as e:
+            print(f"Error: {type(e)} {model}: {e}")
+            if isinstance(e, ValueError):
+                # Router filtered so doesn't actually count against any limits
+                limiter.rollback_request(request_time, tokens_used)
+            else:
+                # made request to model, but that doesn't count against TPM?
+                limiter.rollback_tokens(request_time, tokens_used)
+            raise
 
-                # how do I add a new function that's the same except for this call here?
-                response = await router.amoderation(
-                    model="openai-moderations", input="this is valid good text"
-                )
-
-                if "sync" in kwargs:
-                    del kwargs["sync"]
-                    response = self.router.completion(model, messages, **kwargs)
-                else:
-                    response = await self.router.acompletion(model, messages, **kwargs)
-                return response
-            except Exception as e:
-                print(f"Error: {type(e)} {model}: {e} {kwargs} {reprlib.repr(messages)}")
-                if isinstance(e, ValueError):
-                    # Router filtered so doesn't actually count against any limits
-                    limiter.rollback_request(request_time, tokens_used)
-                    await asyncio.sleep(1.5**i)  # trying again against router
-                else:
-                    # made request to model, but that doesn't count against TPM?
-                    limiter.rollback_tokens(request_time, tokens_used)
-                # Other Error types?
-                if (
-                    isinstance(e, litellm.exceptions.BadRequestError)
-                    or getattr(e, "status_code", 0) // 100 == 4
-                ):
-                    print("leaving early")
-                    return e
-                i += 1
+    async def make_request(self, model, messages=None, **kwargs):
+        """
+        Make a request with rate limiting using the context manager.
+        """
+        tokens_used = token_counter(messages=messages, text=kwargs.get("input", None))
+        for i in range(3):
+            async with self.rate_limited_request(model, tokens_used) as request_time:
+                try:
+                    if "_is_test" in kwargs:
+                        await asyncio.sleep(0.5)
+                        return 1
+                    if "sync" in kwargs:
+                        del kwargs["sync"]
+                        response = self.router.completion(model, messages, **kwargs)
+                    elif "input" in kwargs:
+                        assert "text-moderation" in model
+                        # passes in input
+                        response = await self.router.amoderation(model=model, **kwargs)
+                    else:
+                        response = await self.router.acompletion(model, messages, **kwargs)
+                    return response
+                except Exception as e:
+                    print(
+                        f"Error: {type(e)} {model} {datetime.fromtimestamp(request_time)}:"
+                        f" {e} {kwargs} {reprlib.repr(messages)}"
+                    )
+                    # Issue with malformed Request (Are there other Error types this misses?)
+                    if (
+                        isinstance(e, litellm.exceptions.BadRequestError)
+                        or isinstance(e, TypeError)
+                        or getattr(e, "status_code", 0) // 100 == 4
+                    ):
+                        print(f"leaving early: {type(e)} {e}")
+                        return e
+                    # else retry
+                    await asyncio.sleep(1.5**i)
         return None
 
     def share_rate_limits(self, shared_rate_limits):
@@ -221,6 +229,7 @@ class BatchRequests:
     BURST_FACTORS = [25, 5, 1]  # Fudge factors for each interval
 
     def __init__(self, max_tokens=500):
+        # max_tokens should be max_output_tokens but that's not always defined
         model_list = [  # list of model deployments
             #### OpenAI tier 5 https://platform.openai.com/account/limits
             # gpt-3.5
@@ -349,7 +358,7 @@ class BatchRequests:
                 "litellm_params": {
                     "model": "vertex_ai/claude-3-haiku@20240307",
                     "api_key": os.getenv("ANTHROPIC_API_KEY"),
-                    "max_tokens": max_tokens,
+                    # "max_output_tokens": max_tokens,
                 },
                 "tpm": 1e5,
                 "rpm": 1e3,
@@ -359,7 +368,7 @@ class BatchRequests:
                 "litellm_params": {
                     "model": "vertex_ai/claude-3-sonnet@20240229",
                     "api_key": os.getenv("ANTHROPIC_API_KEY"),
-                    "max_tokens": max_tokens,
+                    # "max_output_tokens": max_tokens,
                 },
                 "tpm": 8e4,
                 "rpm": 1e3,
@@ -370,7 +379,7 @@ class BatchRequests:
                 "litellm_params": {
                     "model": "anthropic/claude-3-opus-20240307",
                     "api_key": os.getenv("ANTHROPIC_API_KEY"),
-                    "max_tokens": max_tokens,
+                    "max_output_tokens": max_tokens,
                 },
                 "tpm": 4e4,
                 "rpm": 1e3,
@@ -382,29 +391,30 @@ class BatchRequests:
                 "litellm_params": {
                     "model": "vertex_ai/gemini-pro",
                     "api_key": os.getenv("GEMINI_API_KEY"),
-                    "max_tokens": max_tokens,
+                    # "max_output_tokens": max_tokens,
                 },
                 "tpm": 1e6,  # don't actually know
                 "rpm": 6e1,
             },
             # 1.5 not availible yet
-            # {
-            #    "model_name": "gemini-pro-1.5",
-            #    "litellm_params": {
-            #        "model": "vertex_ai/gemini-pro-1.5",
-            #        "api_key": os.getenv("GEMINI_API_KEY"),
-            #        "max_tokens": max_tokens,
-            #    },
-            #    "tpm": 1e6,  # don't actually know
-            #    "rpm": 6e1,
-            # },
+            {
+                "model_name": "gemini-pro-1.5",
+                "litellm_params": {
+                    # "model": "vertex_ai/gemini-pro-1.5", # didnt work
+                    "model": "gemini/gemini-1.5-pro-latest",
+                    "api_key": os.getenv("GEMINI_API_KEY"),
+                    # "max_output_tokens": max_tokens,
+                },
+                "tpm": 1e6,  # don't actually know
+                "rpm": 6e1,
+            },
             # Updated PalM2 chat-bison@002
             {
                 "model_name": "chat-bison@002",
                 "litellm_params": {
                     "model": "vertex_ai/chat-bison@002",
                     "api_key": os.getenv("GEMINI_API_KEY"),
-                    "max_tokens": max_tokens,
+                    # "max_output_tokens": max_tokens,
                 },
                 "tpm": 1e6,  # don't actually know
                 "rpm": 6e1,

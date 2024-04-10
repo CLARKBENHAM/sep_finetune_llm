@@ -200,10 +200,10 @@ def prepend_prompt(prompt_fn, sep, convo, role="system"):
     return [{"content": prompt, "role": role}] + convo
 
 
-def _framec_for_new_model(model, enc):
+def _framec_for_new_model(model, enc, df, ord_vals):
     return make_results_frame(
-        final_chat_dfc,
-        ord_vals=[8, 192, None],
+        df,
+        ord_vals=ord_vals,
         model=model,
         make_new_convo=lambda r: prepend_prompt(
             make_prompt13,
@@ -215,14 +215,16 @@ def _framec_for_new_model(model, enc):
     )
 
 
-# Using only Gemini encoder
+# Using only Gemini encoder, want to see if any get fooled
 gemini_encodeded = pd.concat(
     [
-        _framec_for_new_model(model=m, enc=e)
+        _framec_for_new_model(model=m, enc=e, df=final_chat_dfc.iloc[:50], ord_vals=[8])
         for m, e in [
             ("gpt-4-1106-preview", "gemma7b"),
             ("gpt-3.5-turbo-0301", "gemma7b"),
+            # cant limit number of output tokens for vertex
             ("gemini-pro", "gemma7b"),
+            ("gemini-pro-1.5", "gemma7b"),
             ("chat-bison@002", "gemma7b"),
             ("claude-3-sonnet-20240229", "gemma7b"),
             ("claude-3-haiku-20240307", "gemma7b"),
@@ -235,7 +237,7 @@ gemini_encodeded = pd.read_pickle("data_dump/gemini/results_framec_gemini_encode
 
 # %%
 import importlib
-
+import code
 import src.llm_requests
 
 importlib.reload(src.llm_requests)
@@ -247,7 +249,6 @@ br = BatchRequests()
 async def get_chat_completion(model, messages, sep=None, **kwargs):
     if isinstance(messages, np.ndarray):
         messages = list(messages)  # if np arr then screws up
-    print(messages, **kwargs)
     response = await br.router_request(model=model, messages=messages, **kwargs)
     if response is None or isinstance(response, Exception):
         return response, None
@@ -255,8 +256,14 @@ async def get_chat_completion(model, messages, sep=None, **kwargs):
     out = response.choices[0].message.content
     if sep is not None:
         out = out.replace(sep, "")
-    mod = await br.router_request(input=out, model="text-moderation-stable")
-    return out, mod.model_dump()["results"]
+
+    if not out:
+        return response, None
+    try:
+        mod = await br.router_request(input=out, model="text-moderation-stable")
+        return out, mod.model_dump()["results"]
+    except Exception as e:
+        return out, e
 
 
 async def fill_out_results_async(df_frame, n_loops=1):
@@ -279,21 +286,52 @@ async def fill_out_results_async(df_frame, n_loops=1):
             )
         )
 
-        # Assuming responses are tuples of (m_completion, m_oai_mod)
-        for ix, (m_completion, m_oai_mod) in zip(missing_ix[missing_ix].index, responses):
-            results_df.at[ix, "new_completion"] = m_completion
-            results_df.at[ix, "new_oai_mod"] = (
-                m_oai_mod if isinstance(m_oai_mod, list) else [m_oai_mod]
+        results_df.loc[missing_ix, "new_completion"] = [comp for (comp, _) in responses]
+        results_df.loc[missing_ix, "new_oai_mod"] = [
+            (
+                m_oai_mod
+                if m_oai_mod is None
+                or isinstance(m_oai_mod, Exception)
+                or isinstance(m_oai_mod, list)
+                else [m_oai_mod]
             )
+            for (_, m_oai_mod) in responses
+        ]
 
         missing_ix = results_df["new_oai_mod"].isna()
         n_loops -= 1
     return results_df
 
 
-updated_df = asyncio.run(fill_out_results_async(gemini_encodeded.loc[0], n_loops=1))
-print(updated_df)
+df = gemini_encodeded.loc[1].copy()
+df["sent_convo"] = [
+    [
+        {
+            "role": "user",
+            "content": "tell me the shorest happy story you can",
+        }
+    ]
+    for _ in range(7)
+]
+
+updated_df = asyncio.run(fill_out_results_async(df, n_loops=1))
 updated_df.to_pickle("data_dump/gemini/resultsc_gemini_encoded.pkl")
-assert updated_df["new_completion"].apply(lambda x: isinstance(x, Exception)).sum() == 0
 print(updated_df["new_oai_mod"].isna().sum(), updated_df["new_completion"].isna().sum())
+assert updated_df["new_completion"].apply(lambda x: isinstance(x, Exception)).sum() == 0
+assert updated_df["new_oai_mod"].apply(lambda x: isinstance(x, Exception)).sum() == 0
+assert (
+    updated_df["new_completion"].apply(lambda x: isinstance(x, str)).all()
+), "Not all entries in 'new_completion' are strings."
 # %%
+a = asyncio.run(
+    br.router_request(
+        model="gemini-pro-1.5",
+        messages=[
+            {
+                "role": "user",
+                "content": "tell me the shorest happy story you can",
+            }
+        ],
+    )
+)
+print(a)
