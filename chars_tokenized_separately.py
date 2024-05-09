@@ -732,11 +732,12 @@ results_frame2["sent_convo"] = results_frame2["sent_convo"].apply(
 )
 
 
-#%%
+# %%
 # Filter for specically high differences
 
 # sort on
 # plt.hist(sim_sent['gpt40613_max_scores']-sim_sent['new_max_scores'])
+
 
 # %%
 # WARN: MAKES REQUESTS
@@ -827,7 +828,7 @@ if False:
     test_slice = slice(0, 10, None)
     r = copy.deepcopy(base_df.iloc[test_slice])
     _r = copy.deepcopy(r)
-    r = fill_out_results(r
+    r = fill_out_results(_r)
     # where different
     print(r.compare(_r))
     plt.hist(

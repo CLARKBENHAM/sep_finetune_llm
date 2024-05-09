@@ -11,11 +11,12 @@ from sentencepiece import SentencePieceProcessor
 import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
-from llm_requests import BatchRequests
+
+# from llm_requests import BatchRequests
 
 # from huggingface_hub import HfApi
-br = BatchRequests()
-br.router_rate_limited
+# br = BatchRequests()
+# br.router_rate_limited
 
 # Configure retry strategy
 retry_strategy = Retry(

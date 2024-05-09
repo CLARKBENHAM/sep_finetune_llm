@@ -1201,6 +1201,7 @@ big_dist_df4["new_any_flagged"] = big_dist_df4["new_oai_mod"].apply(chat_is_flag
 big_dist_df4["og_max_score"] = big_dist_df4["og_openai_moderation"].apply(chat_max_scores)
 big_dist_df4["og_any_flagged"] = big_dist_df4["og_openai_moderation"].apply(chat_is_flagged)
 big_dist_df4.to_pickle(f"data_dump/oai_mod/big_bad_finetune_w_mod_english_only_{git_hash()}.pkl")
+big_dist_df4 = pd.read_pickle("data_dump/oai_mod/big_bad_finetune_w_mod_english_only_d5f3f5a.pkl")
 
 df4 = big_dist_df4.rename(
     columns={"og_any_flagged": "default_any_flagged", "og_max_score": "default_max_score"}
